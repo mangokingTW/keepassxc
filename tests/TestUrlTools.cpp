@@ -1,0 +1,173 @@
+/*
+ *  Copyright (C) 2026 KeePassXC Team <team@keepassxc.org>
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 2 or (at your option)
+ *  version 3 of the License.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "TestUrlTools.h"
+#include <QTest>
+
+QTEST_GUILESS_MAIN(TestUrlTools)
+
+void TestUrlTools::initTestCase()
+{
+    QLocale::setDefault(QLocale::c());
+}
+
+void TestUrlTools::testTopLevelDomain()
+{
+    // Create list of URLs and expected TLD responses
+    QList<QPair<QString, QString>> tldUrls{
+        {QString("https://another.example.co.uk"), QString("co.uk")},
+        {QString("https://www.example.com"), QString("com")},
+        {QString("https://example.com"), QString("com")},
+        {QString("https://github.com"), QString("com")},
+        {QString("http://test.net"), QString("net")},
+        {QString("http://so.many.subdomains.co.jp"), QString("co.jp")},
+        {QString("https://192.168.0.1"), QString("192.168.0.1")},
+        {QString("https://192.168.0.1:8000"), QString("192.168.0.1")},
+        {QString("https://www.nic.ar"), QString("ar")},
+        {QString("https://no.no.no"), QString("no")},
+        {QString("https://jap.an.ide.kyoto.jp"), QString("ide.kyoto.jp")}, // ide.kyoto.jp is a TLD
+        {QString("ar"), QString("ar")},
+    };
+
+    for (const auto& u : tldUrls) {
+        QCOMPARE(UrlTools::getTopLevelDomainFromUrl(u.first), u.second);
+    }
+
+    // Create list of URLs and expected base URL responses
+    QList<QPair<QString, QString>> baseUrls{
+        {QString("https://another.example.co.uk"), QString("example.co.uk")},
+        {QString("https://www.example.com"), QString("example.com")},
+        {QString("http://test.net"), QString("test.net")},
+        {QString("http://so.many.subdomains.co.jp"), QString("subdomains.co.jp")},
+        {QString("https://192.168.0.1"), QString("192.168.0.1")},
+        {QString("https://192.168.0.1:8000"), QString("192.168.0.1")},
+        {QString("https://www.nic.ar"), QString("nic.ar")},
+        {QString("https://www.arpa"), QString("www.arpa")},
+        {QString("https://jap.an.ide.kyoto.jp"), QString("an.ide.kyoto.jp")}, // ide.kyoto.jp is a TLD
+        {QString("https://kobe.jp"), QString("kobe.jp")},
+    };
+
+    for (const auto& u : baseUrls) {
+        QCOMPARE(UrlTools::getBaseDomainFromUrl(u.first), u.second);
+    }
+}
+
+void TestUrlTools::testIsIpAddress()
+{
+    auto host1 = "example.com"; // Not valid
+    auto host2 = "192.168.0.1";
+    auto host3 = "278.21.2.0"; // Not valid
+    auto host4 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
+    auto host5 = "2001:db8:0:1:1:1:1:1";
+    auto host6 = "fe80::1ff:fe23:4567:890a";
+    auto host7 = "2001:20::1";
+    auto host8 = "2001:0db8:85y3:0000:0000:8a2e:0370:7334"; // Not valid
+    auto host9 = "[::]";
+    auto host10 = "::";
+    auto host11 = "[2001:20::1]";
+
+    QVERIFY(!UrlTools::isIpAddress(host1));
+    QVERIFY(UrlTools::isIpAddress(host2));
+    QVERIFY(!UrlTools::isIpAddress(host3));
+    QVERIFY(UrlTools::isIpAddress(host4));
+    QVERIFY(UrlTools::isIpAddress(host5));
+    QVERIFY(UrlTools::isIpAddress(host6));
+    QVERIFY(UrlTools::isIpAddress(host7));
+    QVERIFY(!UrlTools::isIpAddress(host8));
+    QVERIFY(UrlTools::isIpAddress(host9));
+    QVERIFY(UrlTools::isIpAddress(host10));
+    QVERIFY(UrlTools::isIpAddress(host11));
+}
+
+void TestUrlTools::testIsUrlIdentical()
+{
+    QVERIFY(UrlTools::isUrlIdentical("https://example.com", "https://example.com"));
+    QVERIFY(UrlTools::isUrlIdentical("https://example.com", "  https://example.com  "));
+    QVERIFY(!UrlTools::isUrlIdentical("https://example.com", "https://example2.com"));
+    QVERIFY(!UrlTools::isUrlIdentical("https://example.com/", "https://example.com/#login"));
+    QVERIFY(UrlTools::isUrlIdentical("https://example.com", "https://example.com/"));
+    QVERIFY(UrlTools::isUrlIdentical("https://example.com/", "https://example.com"));
+    QVERIFY(UrlTools::isUrlIdentical("https://example.com/  ", "  https://example.com"));
+    QVERIFY(!UrlTools::isUrlIdentical("https://example.com/", "  example.com"));
+    QVERIFY(UrlTools::isUrlIdentical("https://example.com/path/to/nowhere", "https://example.com/path/to/nowhere/"));
+    QVERIFY(!UrlTools::isUrlIdentical("https://example.com/", "://example.com/"));
+    QVERIFY(UrlTools::isUrlIdentical("ftp://127.0.0.1/", "ftp://127.0.0.1"));
+}
+
+void TestUrlTools::testIsUrlValid()
+{
+    QHash<QString, bool> urls;
+    urls["https://github.com/login"] = true;
+    urls["https:///github.com/"] = false;
+    urls["http://github.com/**//*"] = false;
+    urls["http://*.github.com/login"] = false;
+    urls["//github.com"] = true;
+    urls["github.com/{}<>"] = false;
+    urls["http:/example.com"] = false;
+    urls["http:/example.com."] = false;
+    urls["cmd://C:/Toolchains/msys2/usr/bin/mintty \"ssh jon@192.168.0.1:22\""] = true;
+    urls["file:///Users/testUser/Code/test.html"] = true;
+    urls["{REF:A@I:46C9B1FFBD4ABC4BBB260C6190BAD20C} "] = true;
+
+    QHashIterator<QString, bool> i(urls);
+    while (i.hasNext()) {
+        i.next();
+        QCOMPARE(UrlTools::isUrlValid(i.key()), i.value());
+    }
+}
+
+void TestUrlTools::testIsUrlValidWithLooseComparison()
+{
+    QHash<QString, bool> urls;
+    urls[""] = true;
+    urls["\"https://github.com/login\""] = true;
+    urls["https://*.github.com/"] = true;
+    urls["*.github.com"] = true;
+    urls["https://*.com"] = false;
+    urls["https://*.computer.com"] = true; // TLD in domain (com) should not affect
+    urls["\"\""] = false;
+    urls["\"*.example.com\""] = false;
+    urls["http://*"] = false;
+    urls["*"] = false;
+    urls["****"] = false;
+    urls["*.co.jp"] = false;
+    urls["*.com"] = false;
+    urls["*.computer.com"] = true;
+    urls["*.computer.com/*com"] = true; // TLD in path should not affect this
+    urls["*com"] = false;
+    urls["*.com/"] = false;
+    urls["*.com/*"] = false;
+    urls["**.com/**"] = false;
+    urls["*.*"] = false;
+    urls["https://example.*"] = false;
+    urls["https://*.example.*"] = false;
+    urls["https://example.c*"] = false;
+    urls["https://myowndomain:8000"] = true;
+
+    QHashIterator<QString, bool> i(urls);
+    while (i.hasNext()) {
+        i.next();
+        QCOMPARE(UrlTools::isUrlValid(i.key(), true), i.value());
+    }
+}
+
+void TestUrlTools::testDomainHasIllegalCharacters()
+{
+    QVERIFY(!UrlTools::domainHasIllegalCharacters("example.com"));
+    QVERIFY(UrlTools::domainHasIllegalCharacters("domain has spaces.com"));
+    QVERIFY(UrlTools::domainHasIllegalCharacters("example#|.com"));
+}

@@ -1,0 +1,28 @@
+{
+  "name": "keepassxc",
+  "version-string": "2.8.0",
+  "builtin-baseline": "66c0373dc7fca549e5803087b9487edfe3aca0a1",
+  "dependencies": [
+    "botan",
+    "minizip",
+    "libqrencode",
+    "readline",
+    "zlib",
+    {
+      "name": "libusb",
+      "platform": "linux | freebsd"
+    },
+    {
+      "name": "libxi",
+      "platform": "linux | freebsd"
+    },
+    {
+      "name": "libxtst",
+      "platform": "linux | freebsd"
+    },
+    {
+      "name": "libxkbcommon",
+      "platform": "linux | freebsd"
+    }
+  ]
+}
