@@ -1,0 +1,151 @@
+# Reproduces keepassxreboot/keepassxc#12956 on stock hosted runners, and checks
+# the sidecar approach against it.
+#
+# The reproduction is a strict xfail: it asserts the behaviour a user expects, so
+# the job is green while the bug is present and goes red the day it stops being
+# present. The fix check is a separate test that only runs once a signed uiAccess
+# helper is installed -- built, signed with a throwaway certificate and placed
+# under Program Files by this workflow, which is also the matrix #12956 asks for:
+# signed versus unsigned, protected path versus user-writable.
+#
+# Why a sidecar rather than the manifest change from #13070: that change put
+# uiAccess on the main binary, and #13116 reverted it because such a binary
+# cannot start at all from a user-writable location, which kills the portable
+# ZIP. A separate helper keeps the main binary ordinary -- if the helper is
+# missing or unsigned, KeePassXC still runs and only this one path is
+# unavailable.
+name: Verify credential-dialog injection (#12956)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wintegrate-credui-12956]
+
+permissions:
+  contents: read
+
+jobs:
+  credui:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+            vsarch: x64
+          - arch: arm64
+            os: windows-11-arm
+            vsarch: arm64
+    name: "credui on ${{ matrix.arch }}"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Also quiets the arm64 image, whose onboarding window owns the foreground
+      # and would swallow every injected keystroke.
+      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
+        with:
+          wintegrate-version: ">=0.5.10"
+
+      - name: Build the uiAccess helper
+        id: build
+        shell: pwsh
+        working-directory: src/autotype/windows/uiaccess-helper
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere is not at $vswhere" }
+          $vs = & $vswhere -latest -products * -property installationPath
+          if (-not $vs) { throw "vswhere found no Visual Studio installation" }
+          $devcmd = Join-Path $vs "Common7\Tools\VsDevCmd.bat"
+          Write-Host "VsDevCmd: $devcmd"
+
+          # The manifest is embedded by the linker. An external .manifest file is
+          # ignored for UAC settings, so uiAccess would silently never be granted.
+          $cl = @(
+            'cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS typehelper.c',
+            '/Fe:typehelper.exe',
+            '/link user32.lib shell32.lib',
+            '/MANIFEST:EMBED /MANIFESTINPUT:typehelper.manifest'
+          ) -join ' '
+          cmd /c "`"$devcmd`" -arch=${{ matrix.vsarch }} -no_logo && $cl"
+          if ($LASTEXITCODE -ne 0) { throw "cl failed with $LASTEXITCODE" }
+          if (-not (Test-Path typehelper.exe)) { throw "typehelper.exe was not produced" }
+
+          # Reported so a run that lost the manifest is distinguishable from one
+          # where the dialog refused the input.
+          $embedded = Select-String -Path typehelper.exe -Pattern 'uiAccess="true"' -Encoding Byte -Quiet
+          Write-Host "manifest embedded: $embedded"
+          if (-not $embedded) { throw "the built binary has no uiAccess manifest" }
+          "helper=$(Resolve-Path typehelper.exe)" >> $env:GITHUB_OUTPUT
+
+      # Case 1 of the matrix: the same binary, unsigned, in a user-writable path.
+      # This is the state a portable ZIP would ship, and the reason #13070 was
+      # reverted -- so it is measured rather than argued about.
+      - name: Record what an unsigned helper does
+        shell: pwsh
+        env:
+          HELPER: ${{ steps.build.outputs.helper }}
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'unsigned.log'
+          $p = Start-Process -FilePath $env:HELPER -ArgumentList 'x', '200', $log -PassThru -Wait `
+                 -ErrorAction SilentlyContinue
+          Write-Host "exit code: $($p.ExitCode)"
+          if (Test-Path $log) { Write-Host "log:"; Get-Content $log } else { Write-Host "no log written" }
+
+      - name: Sign the helper and install it under Program Files
+        shell: pwsh
+        env:
+          HELPER: ${{ steps.build.outputs.helper }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dst = Join-Path $env:ProgramFiles 'keepassxc-uiaccess'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          $exe = Join-Path $dst 'typehelper.exe'
+          Copy-Item $env:HELPER $exe -Force
+
+          # A throwaway certificate, trusted for this run only. uiAccess does not
+          # care which CA signed the binary, only that the chain is trusted on
+          # this machine and that the file sits where a standard user cannot
+          # write -- which is exactly the pair of conditions #13116 hit.
+          $cert = New-SelfSignedCertificate -Subject "CN=keepassxc uiaccess test" `
+            -Type CodeSigningCert -CertStoreLocation Cert:\LocalMachine\My `
+            -NotAfter (Get-Date).AddMonths(1)
+          foreach ($store in 'Root', 'TrustedPublisher') {
+            $s = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, 'LocalMachine')
+            $s.Open('ReadWrite'); $s.Add($cert); $s.Close()
+          }
+          Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256 | Out-Null
+          $sig = Get-AuthenticodeSignature $exe
+          Write-Host "signature: $($sig.Status) $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "the helper is not validly signed" }
+
+          $writable = (Get-Acl $dst).Access | Where-Object {
+            $_.IdentityReference -match 'Users' -and $_.FileSystemRights -match 'Write|Modify|FullControl'
+          }
+          Write-Host "standard users can write to the install directory: $([bool]$writable)"
+          "CREDUI_UIACCESS_HELPER=$exe" >> $env:GITHUB_ENV
+
+      # A native crash prints a traceback, lets execution continue, and leaves
+      # pytest reporting success -- so the log is checked as well as the code.
+      - name: Reproduce, then check the sidecar
+        shell: pwsh
+        env:
+          WINTEGRATE_RECORD: "1"
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'pytest.log'
+          pytest tests/ui-credui -v -s -rxXs 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if (Select-String -Path $log -Pattern 'Windows fatal exception|access violation' -Quiet) {
+            throw "a native crash appeared in the log; pytest's exit code ($code) does not reflect it"
+          }
+          if ($code -ne 0) { throw "pytest failed with $code" }
+
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: credui-injection-${{ matrix.arch }}
+          path: recording-artifacts/
+          if-no-files-found: warn
+          retention-days: 14

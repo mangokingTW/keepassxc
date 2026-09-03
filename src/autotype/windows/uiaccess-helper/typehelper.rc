@@ -1,0 +1,4 @@
+#include <windows.h>
+/* 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 = RT_MANIFEST. An external
+   .manifest file is ignored for UAC settings, so it has to be embedded. */
+1 24 "typehelper.manifest"

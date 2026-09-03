@@ -1,0 +1,210 @@
+"""keepassxreboot/keepassxc#12956, as a baseline anyone can re-run.
+
+The claim under test: keyboard input injected by an ordinary-integrity process
+does not reach the "Windows Security" credential dialog. That is measured three
+ways, because the obvious way is unreliable:
+
+  * `test_dialog_is_the_brokered_one` fixes what is being measured -- a dialog
+    of class "Credential Dialog Xaml Host" owned by CredentialUIBroker, not some
+    look-alike, and records that UIA cannot enumerate its fields.
+  * `test_injected_input_reaches_the_dialog` is the reproduction, written as the
+    behaviour a user expects and marked **strict xfail**: it xfails while the
+    bug is present and becomes a hard failure once a build or a Windows update
+    fixes it, so the baseline cannot rot silently.
+  * `test_uiaccess_helper_reaches_the_dialog` is the proposed fix. It skips with
+    a reason unless a signed uiAccess helper is installed, because "the fix
+    works" and "the fix is not installed" must not look alike.
+
+What is deliberately *not* asserted: that the January 2026 update caused this.
+Showing that needs a machine without it, and there isn't one here -- these tests
+say what today does, not what changed.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+from credui_harness import BROKER, CredentialPrompt, broker_pids
+from wintegrate.element import UiaElement
+from wintegrate.interop import send_keys
+
+PROBE_USER = "wintegrate-probe"
+PROBE_PASSWORD = "probe-password"
+
+# Where an installed helper would live. Under Program Files on purpose: Windows
+# grants uiAccess only to a signed binary in a path a standard user cannot write.
+HELPER = Path(os.environ.get("CREDUI_UIACCESS_HELPER",
+                             r"C:\Program Files\wintegrate-uiaccess\typehelper.exe"))
+
+
+def _shell_execute(exe: Path, params: str) -> bool:
+    """Starts `exe` through ShellExecuteEx and waits for it.
+
+    Needed because uiAccess binaries cannot be started with CreateProcess; see
+    the note in the test below.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("fMask", ctypes.c_ulong),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", wintypes.HINSTANCE),
+            ("lpIDList", wintypes.LPVOID),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", wintypes.HKEY),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIcon", wintypes.HANDLE),
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    SEE_MASK_NOASYNC = 0x00000100
+    SW_SHOWMINNOACTIVE = 7
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+    info.lpVerb = "open"
+    info.lpFile = str(exe)
+    info.lpParameters = params
+    # Minimised and not activated: the helper must not take the foreground from
+    # the dialog it is about to type into.
+    info.nShow = SW_SHOWMINNOACTIVE
+
+    ok = shell32.ShellExecuteExW(ctypes.byref(info))
+    if not ok:
+        print(f"ShellExecuteExW failed: {ctypes.get_last_error()}")
+    return bool(ok)
+
+
+def _submit(text: str = PROBE_USER) -> None:
+    """Types a username, a password, and Enter -- the auto-type shape."""
+    send_keys(text)
+    time.sleep(0.6)
+    send_keys("{TAB}")
+    time.sleep(0.4)
+    send_keys(PROBE_PASSWORD)
+    time.sleep(0.6)
+    send_keys("{ENTER}")
+
+
+def test_dialog_is_the_brokered_one():
+    """Pins the target, so a later failure cannot be a different window."""
+    with CredentialPrompt() as prompt:
+        window = prompt.window
+        assert (window.class_name or "") == "Credential Dialog Xaml Host"
+        assert str(window.pid) in broker_pids(), (
+            f"the dialog belongs to pid {window.pid}, which is not a {BROKER} process "
+            f"({broker_pids()}) -- this is not the dialog the issue is about"
+        )
+        # Recorded, not asserted as desirable: UIA sees no fields here, which is
+        # why these tests use the API's return value as the witness.
+        fields = UiaElement.from_handle(window.hwnd).find_all(control_type_id=50004)
+        print(f"UIA Edit children: {len(fields)}")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "keepassxreboot/keepassxc#12956: SendInput from an ordinary-integrity "
+        "process does not reach the CredentialUIBroker dialog. Strict, so this "
+        "fails loudly if it ever starts working rather than passing unnoticed."
+    ),
+)
+def test_injected_input_reaches_the_dialog():
+    """The reproduction, written as the behaviour a user expects.
+
+    KeePassXC's auto-type is exactly this call: AutoTypeWindows.cpp sends
+    KEYEVENTF_UNICODE and KEYEVENTF_SCANCODE through SendInput from the ordinary
+    process. So a difference in outcome between this and the helper below is a
+    difference in privilege, not in API.
+    """
+    with CredentialPrompt() as prompt:
+        _submit()
+        outcome = prompt.outcome()
+        print(f"credui outcome: {outcome!r}")
+        assert "RESULT=0" in outcome, (
+            "the dialog was never submitted: CredUIPromptForWindowsCredentials had not "
+            "returned by the time the wait expired, which is what a swallowed keystroke "
+            "looks like from outside the dialog"
+        )
+        assert PROBE_USER in outcome, f"submitted, but not with the injected text: {outcome!r}"
+
+
+@pytest.mark.skipif(
+    not HELPER.exists(),
+    reason=(
+        f"no uiAccess helper at {HELPER}. Build and sign it first -- an absent "
+        f"helper must not read as a working fix."
+    ),
+)
+def test_uiaccess_helper_reaches_the_dialog():
+    """The proposed fix: the same SendInput, from a uiAccess process.
+
+    uiAccess is not elevation. The helper runs as the same user with no UAC
+    prompt; what it gains is exemption from UIPI. If this passes while the test
+    above xfails, the collision is UIPI and a signed sidecar is a fix that does
+    not require running the whole application elevated.
+    """
+    with CredentialPrompt() as prompt:
+        window = prompt.window
+        # The whole sequence goes to the helper -- username, Tab, password,
+        # Enter. Sending any part of it from here would reintroduce exactly the
+        # unprivileged injection the test above shows does not arrive.
+        sequence = f"{PROBE_USER}\t{PROBE_PASSWORD}\n"
+        log = Path(os.environ.get("TEMP", r"C:\Users\Public")) / "uiaccess_helper.log"
+        if log.exists():
+            log.unlink()
+
+
+        # ShellExecute, not CreateProcess: a uiAccess binary launched with
+        # CreateProcess fails with ERROR_ELEVATION_REQUIRED (740). The grant
+        # comes from the AppInfo service, and only the shell path consults it --
+        # which is itself a constraint on any sidecar design, since the
+        # application cannot simply spawn the helper.
+        # The target window is handed over explicitly. Letting the helper pick
+        # the foreground window is a race it lost once -- to a console -- and the
+        # run then looked like uiAccess had failed when the mechanism was fine.
+        started = _shell_execute(HELPER, f'"{sequence}" 2500 "{log}" {window.hwnd}')
+        assert started, "ShellExecuteEx refused to start the helper"
+
+        deadline = time.monotonic() + 40.0
+        report = ""
+        while time.monotonic() < deadline:
+            if log.exists():
+                report = log.read_text(encoding="utf-8", errors="replace")
+                if "typed=" in report:
+                    break
+            time.sleep(0.5)
+        print(f"helper report:\n{report}")
+        assert "foreground_now=1" in report, (
+            "the helper could not bring the dialog to the foreground, so it refused to "
+            f"type; report was: {report!r}"
+        )
+        assert "uiAccess=1" in report, (
+            "the helper did not get the uiAccess flag -- Windows grants it only to a "
+            "signed binary under a protected path, so this is a deployment problem "
+            "rather than a measurement of the dialog. Report was: " + repr(report)
+        )
+
+        outcome = prompt.outcome()
+        print(f"credui outcome: {outcome!r}")
+        assert "RESULT=0" in outcome and PROBE_USER in outcome, (
+            f"the uiAccess helper's input did not submit the dialog either: {outcome!r}"
+        )
