@@ -198,7 +198,15 @@ class ForegroundTrace:
                 # its owner kept re-activating -- and it is not what the rest of
                 # this suite does: nothing else depends on the Z-order, only on
                 # its own window being in front.
-                user32.SetForegroundWindow(wintypes.HWND(self.hold))
+                #
+                # Through wintegrate rather than a bare SetForegroundWindow:
+                # that call is refused across processes unless the caller
+                # already owns the foreground, and it fails silently, so the
+                # trace would have shown interventions that did nothing.
+                try:
+                    w.Window(self.hold).set_foreground()
+                except Exception as exc:  # noqa: BLE001 - a diagnostic thread
+                    self.interventions[-1]["set_foreground_failed"] = f"{type(exc).__name__}"
             time.sleep(self.interval)
 
     def __exit__(self, *exc):

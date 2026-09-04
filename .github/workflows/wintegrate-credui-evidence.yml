@@ -377,13 +377,12 @@ jobs:
             ''
             '[GUI]'
             'CheckForUpdates=false'
-            ''
-            '[Security]'
-            # No confirmation dialog: it is one more window between the hotkey
-            # and the target, and the window that is in front while KeePassXC
-            # resolves its target is what decides where the keystrokes go.
-            # DatabaseWidget only asks when this is true.
-            'AutotypeAsk=false'
+          # Security/AutotypeAsk is deliberately left at its default. Switching
+          # the confirmation dialog off looked like a simplification and was a
+          # regression: the dialog is what gives the credential prompt time to
+          # become the active window again, and without it KeePassXC hid itself
+          # and resolved its target while its own window was still in front --
+          # so the helper was never started at all. Measured both ways.
           ) | Set-Content -Path $ini -Encoding ASCII
           Write-Host "wrote $ini"
           Get-Content $ini | Write-Host
