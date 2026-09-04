@@ -17,6 +17,7 @@ import ctypes
 import os
 import subprocess
 import sys
+import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
@@ -136,6 +137,58 @@ def display_affinity(hwnd: int) -> str:
     if not user32.GetWindowDisplayAffinity(wintypes.HWND(hwnd), ctypes.byref(value)):
         return f"unreadable (err={ctypes.get_last_error()})"
     return DISPLAY_AFFINITY.get(value.value, hex(value.value))
+
+
+class ForegroundTrace:
+    """Samples which window has the foreground, for the length of a block.
+
+    Auto-Type resolves its target as "whatever is active" at one instant, and
+    on a runner the patched build never asked to delegate -- no helper process
+    started and KeePassXC printed no warning, which together mean the predicate
+    was handed a window that is not the credential prompt. The only way to know
+    which window that was is to record what the foreground did while the
+    sequence ran; on a machine where this passes, the prompt is simply there
+    throughout.
+    """
+
+    def __init__(self, session, interval: float = 0.1):
+        self.session = session
+        self.interval = interval
+        self.samples: list[tuple[float, int, str, str]] = []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self):
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def _loop(self):
+        start = time.monotonic()
+        last = None
+        while not self._stop.is_set():
+            hwnd = w.get_foreground_window()
+            if hwnd != last:
+                last = hwnd
+                self.samples.append((
+                    round(time.monotonic() - start, 2), hwnd,
+                    w.get_window_class(hwnd) or "", (w.get_window_title(hwnd) or "")[:40],
+                ))
+            time.sleep(self.interval)
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        # Only the changes, because a list of identical samples says nothing:
+        # what matters is the order the foreground moved in.
+        self.session.log_event(
+            "foreground_trace",
+            f"{len(self.samples)} changes while auto-type ran",
+            samples=[{"t": t, "hwnd": hex(h), "class": c, "title": ti}
+                     for t, h, c, ti in self.samples],
+        )
+        return False
 
 
 def ensure_foreground(session, window, attempts: int = 6) -> None:
@@ -400,7 +453,7 @@ def run(session) -> int:
         if w.get_foreground_window() != window.hwnd:
             raise AssertionError("KeePassXC was not active when auto-type fired")
 
-    with session.step("perform auto-type"):
+    with session.step("perform auto-type"), ForegroundTrace(session):
         w.send_hotkey("ctrl+shift+v")
         time.sleep(2.5)
         # KeePassXC asks before typing into a window that is not its own. The
