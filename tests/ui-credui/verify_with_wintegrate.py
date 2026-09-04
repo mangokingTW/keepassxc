@@ -481,47 +481,49 @@ def run(session) -> int:
         if w.get_foreground_window() != window.hwnd:
             raise AssertionError("KeePassXC was not active when auto-type fired")
 
-    # The prompt is held in front for the whole sequence: KeePassXC hides its
-    # own window and then resolves "the active window" as its target, so what is
-    # in front during those few hundred milliseconds decides where the
-    # keystrokes go.
-    with session.step("perform auto-type"), ForegroundTrace(session, hold=prompt.hwnd):
+    with session.step("perform auto-type"):
+        # Order matters, and getting it wrong looked like the bug under test.
+        # The hotkey is injected input at medium integrity, so it only reaches
+        # KeePassXC while KeePassXC is in front; holding the prompt first made
+        # UIPI drop the hotkey and the run produced no auto-type at all -- no
+        # helper, no confirmation, nothing to distinguish it from the failure it
+        # was supposed to measure.
         w.send_hotkey("ctrl+shift+v")
-        time.sleep(2.5)
-        # KeePassXC asks before typing into a window that is not its own. The
-        # button is chosen by excluding the cancelling one rather than by
-        # matching an affirmative label: this dialog came up as 'Yes'/'Cancel'
-        # on a zh-TW desktop whose menus are all Chinese, so a run that looked
-        # for \u662f clicked nothing and left the dialog sitting there.
-        # The dialog is a separate top-level Qt window, found by class rather
-        # than by title: its title is localised.
-        dialog = None
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and dialog is None:
-            for snapshot in w.WindowCensus.capture():
-                if (snapshot.is_visible and snapshot.hwnd != window.hwnd
-                        and (snapshot.class_name or "").startswith("Qt")):
-                    dialog = snapshot
-                    break
-            time.sleep(0.2)
-        if dialog is None:
-            session.log_event("confirmation", "no confirmation dialog appeared")
-        else:
-            log_window(session, "confirmation", dialog.hwnd)
-            accept_button(session, dialog.hwnd).invoke()
 
-        outcome = ""
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if RESULT.exists():
-                outcome = RESULT.read_text(encoding="utf-8", errors="replace").strip()
-                if outcome:
-                    break
-            time.sleep(0.5)
-        session.capture_screenshot("after-auto-type")
-        submitted = "RESULT=0" in outcome and USERNAME in outcome
-        session.log_event("credui_outcome", outcome.replace("\n", " | ") or "never submitted",
-                          submitted=submitted)
+        # Only now: KeePassXC hides its own window and then resolves "the active
+        # window" as its target, so what is in front during those few hundred
+        # milliseconds decides where the keystrokes go.
+        with ForegroundTrace(session, hold=prompt.hwnd):
+            time.sleep(2.5)
+            # The dialog is a separate top-level Qt window, found by class rather
+            # than by title: its title is localised.
+            dialog = None
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and dialog is None:
+                for snapshot in w.WindowCensus.capture():
+                    if (snapshot.is_visible and snapshot.hwnd != window.hwnd
+                            and (snapshot.class_name or "").startswith("Qt")):
+                        dialog = snapshot
+                        break
+                time.sleep(0.2)
+            if dialog is None:
+                session.log_event("confirmation", "no confirmation dialog appeared")
+            else:
+                log_window(session, "confirmation", dialog.hwnd)
+                accept_button(session, dialog.hwnd).invoke()
+
+            outcome = ""
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if RESULT.exists():
+                    outcome = RESULT.read_text(encoding="utf-8", errors="replace").strip()
+                    if outcome:
+                        break
+                time.sleep(0.5)
+            session.capture_screenshot("after-auto-type")
+            submitted = "RESULT=0" in outcome and USERNAME in outcome
+            session.log_event("credui_outcome", outcome.replace("\n", " | ") or "never submitted",
+                              submitted=submitted)
 
     if host.poll() is None:
         host.terminate()
