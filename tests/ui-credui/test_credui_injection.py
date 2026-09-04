@@ -142,20 +142,15 @@ def medium_integrity_submission():
     root = Path(os.environ.get("RUNNER_TEMP") or os.environ.get("TEMP") or r"C:\Users\Public")
     report_path = root / "credui_typer_report.txt"
 
-    # Checked before raising anything: with UAC off there is no ordinary
-    # integrity level to drop to, so this host cannot produce the case at all.
-    # A GitHub hosted runner is exactly that, and the first version of this
-    # recorded its elevated run as a reproduction.
-    if is_elevated() and not uac_enabled():
-        pytest.skip(
-            "this session is elevated and UAC is disabled (EnableLUA != 1), so no "
-            "ordinary-integrity process can be started here. The reproduction needs a "
-            "host with UAC on; the uiAccess check below still runs."
-        )
+    # No pre-emptive guess about why a host might refuse to de-elevate: an
+    # earlier version skipped on "UAC is disabled", and the hosted runner it was
+    # written for reports EnableLUA=1 while still running a RunLevel Limited
+    # task elevated. Whether de-elevation worked is decided below, from what the
+    # typer reports about its own token.
+    print(f"test process elevated: {is_elevated()}  UAC enabled: {uac_enabled()}")
 
     with CredentialPrompt() as prompt:
         window = prompt.window
-        print(f"test process elevated: {is_elevated()}")
         report = type_at_medium_integrity(
             window.hwnd, f"{PROBE_USER}\t{PROBE_PASSWORD}\n", report_path
         )

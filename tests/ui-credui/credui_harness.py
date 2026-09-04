@@ -106,8 +106,10 @@ def is_elevated() -> bool:
 def uac_enabled() -> bool:
     """Whether this machine has UAC on.
 
-    Without it there is no filtered token to drop to, so the ordinary-integrity
-    case cannot be produced here at all.
+    Not on its own a sufficient condition: a GitHub hosted runner reports
+    EnableLUA=1 and still runs a RunLevel Limited scheduled task elevated. So
+    this is reported, and whether de-elevation actually happened is decided by
+    what the typer reports about itself.
     """
     value = powershell(
         "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion"

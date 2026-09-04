@@ -14,6 +14,7 @@ Usage: type_into.py <hwnd> <sequence> <report_path>
 from __future__ import annotations
 
 import ctypes
+import os
 from ctypes import wintypes
 import sys
 import time
@@ -57,14 +58,12 @@ def elevation() -> str:
     return "elevated" if elevated.value else "not-elevated"
 
 
-def enable_lua() -> str:
-    """The machine's UAC policy.
+def policy(name: str) -> str:
+    """One UAC policy value, or why it could not be read.
 
-    With UAC off there is no filtered token, so an administrator account cannot
-    be dropped to ordinary integrity at all -- and a scheduled task registered
-    with RunLevel Limited still runs elevated. That is the state of a GitHub
-    hosted runner, and without this line the report just says "elevated" with no
-    explanation.
+    Reported rather than interpreted. Whether a process can be dropped to
+    ordinary integrity depends on more than one of these, and guessing which one
+    explains a given host has already been wrong once.
     """
     import winreg
 
@@ -73,7 +72,7 @@ def enable_lua() -> str:
             winreg.HKEY_LOCAL_MACHINE,
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
         ) as key:
-            value, _ = winreg.QueryValueEx(key, "EnableLUA")
+            value, _ = winreg.QueryValueEx(key, name)
             return str(value)
     except OSError as exc:
         return f"unknown ({exc})"
@@ -87,7 +86,16 @@ def main() -> int:
     sequence = sys.argv[2]
     report = Path(sys.argv[3])
 
-    lines = [f"elevation={elevation()}", f"EnableLUA={enable_lua()}"]
+    lines = [
+        f"elevation={elevation()}",
+        f"EnableLUA={policy('EnableLUA')}",
+        # Printed because a run that could not de-elevate has to explain itself.
+        # A GitHub hosted runner reports EnableLUA=1 and *still* runs a
+        # RunLevel Limited task elevated, so "UAC is off" is not the reason --
+        # this is where to look next.
+        f"FilterAdministratorToken={policy('FilterAdministratorToken')}",
+        f"user={os.environ.get('USERNAME')!r}",
+    ]
 
     for _ in range(6):
         user32.SetForegroundWindow(hwnd)
