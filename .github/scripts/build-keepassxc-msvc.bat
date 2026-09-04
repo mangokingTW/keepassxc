@@ -23,15 +23,18 @@ if not defined VSPATH (
 call "%VSPATH%\Common7\Tools\VsDevCmd.bat" -arch=%ARCH% -no_logo
 if errorlevel 1 exit /b 1
 
+rem The triplet is %ARCH%-windows, not -static. vcpkg's static triplet builds
+rem botan with /MT while Qt from aqt and KeePassXC's own objects are /MD:
+rem   botan-3.lib: error LNK2038: mismatch detected for 'RuntimeLibrary':
+rem   'MT_StaticRelease' doesn't match 'MD_DynamicRelease'
+rem A rem line *inside* the caret-continued block below breaks the command
+rem instead of documenting it -- that produced "CMake Error: Unknown argument
+rem -static:".
 cmake -S . -B build -G Ninja ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DCMAKE_C_COMPILER=cl ^
   -DCMAKE_CXX_COMPILER=cl ^
   -DCMAKE_TOOLCHAIN_FILE="%VCPKG_INSTALLATION_ROOT%\scripts\buildsystems\vcpkg.cmake" ^
-rem Dynamic CRT, not -static: vcpkg's static triplet builds botan with /MT while
-rem Qt from aqt and KeePassXC's own objects are /MD, and the link fails with
-rem   botan-3.lib: error LNK2038: mismatch detected for 'RuntimeLibrary':
-rem   'MT_StaticRelease' doesn't match 'MD_DynamicRelease'
   -DVCPKG_TARGET_TRIPLET=%ARCH%-windows ^
   -DCMAKE_PREFIX_PATH="%QT_PREFIX%" ^
   -DWITH_TESTS=OFF ^
