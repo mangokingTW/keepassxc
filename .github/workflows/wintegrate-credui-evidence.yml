@@ -120,8 +120,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cmake --install failed with $LASTEXITCODE" }
           $exe = Get-ChildItem $stage -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
           if (-not $exe) { throw "the install produced no KeePassXC.exe" }
+          # Both binaries, and the compiler runtime with them. windeployqt
+          # resolves dependencies per binary, and the CLI is the one this run
+          # needs first: deployed for the GUI alone it started and died with
+          # 0xC0000135 (STATUS_DLL_NOT_FOUND), which surfaced only as
+          # "db-create failed with -1073741515".
+          $cli = Join-Path $exe.DirectoryName 'keepassxc-cli.exe'
           & "$env:QT_PREFIX\bin\windeployqt.exe" --release --no-translations `
-            --no-system-d3d-compiler --no-opengl-sw $exe.FullName
+            --no-system-d3d-compiler --no-opengl-sw --compiler-runtime `
+            $exe.FullName $cli
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with $LASTEXITCODE" }
           # cmake --install rather than hand-picked DLLs: a bundle assembled by
           # hand ran but could not unlock any database, because the data
@@ -132,7 +139,25 @@ jobs:
             }
           }
           "KPXC_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
-          "KPXC_CLI=$(Join-Path $exe.DirectoryName 'keepassxc-cli.exe')" >> $env:GITHUB_ENV
+          "KPXC_CLI=$cli" >> $env:GITHUB_ENV
+
+          # Asked here rather than discovered three steps later as an exit code
+          # nobody can read. A console binary that cannot load a DLL exits with
+          # 0xC0000135 and prints nothing at all, so the listing is what a
+          # reader needs.
+          & $cli --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "keepassxc-cli --version exited $LASTEXITCODE (0x$('{0:X8}' -f $LASTEXITCODE))"
+            Write-Host "--- what is next to it:"
+            Get-ChildItem $exe.DirectoryName | Select-Object Name, Length |
+              Format-Table -AutoSize | Out-String | Write-Host
+            Write-Host "--- what it imports:"
+            $dumpbin = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio" -Recurse `
+              -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($dumpbin) { & $dumpbin.FullName /dependents $cli | Write-Host }
+            else { Write-Host "(no dumpbin on this image)" }
+            throw "keepassxc-cli cannot start; the database step would fail with an unreadable code"
+          }
 
       - name: Check the built binary matches the variant
         shell: pwsh
