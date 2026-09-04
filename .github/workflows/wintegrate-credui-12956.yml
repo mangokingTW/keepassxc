@@ -73,7 +73,9 @@ jobs:
           $cl = @(
             'cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS typehelper.c',
             '/Fe:typehelper.exe',
-            '/link user32.lib shell32.lib',
+            # advapi32 for OpenProcessToken/GetTokenInformation: mingw links it
+            # by default, so the missing entry only showed up here.
+            '/link user32.lib shell32.lib advapi32.lib',
             '/MANIFEST:EMBED',
             '/MANIFESTUAC:"level=''asInvoker'' uiAccess=''true''"'
           ) -join ' '
