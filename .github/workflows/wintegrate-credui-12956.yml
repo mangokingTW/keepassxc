@@ -85,7 +85,11 @@ jobs:
 
           # Reported so a run that lost the manifest is distinguishable from one
           # where the dialog refused the input.
-          $embedded = Select-String -Path typehelper.exe -Pattern 'uiAccess="true"' -Encoding Byte -Quiet
+          # Read the bytes directly: PowerShell 7 removed `Select-String -Encoding
+          # Byte`, and the step is run by pwsh, so the check itself failed while
+          # the compile had succeeded.
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path typehelper.exe))
+          $embedded = [System.Text.Encoding]::ASCII.GetString($bytes).Contains('uiAccess="true"')
           Write-Host "manifest embedded: $embedded"
           if (-not $embedded) { throw "the built binary has no uiAccess manifest" }
           "helper=$(Resolve-Path typehelper.exe)" >> $env:GITHUB_OUTPUT
