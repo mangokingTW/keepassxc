@@ -157,15 +157,14 @@ class ForegroundTrace:
     throughout.
     """
 
-    def __init__(self, session, interval: float = 0.1, allowed: set[int] | None = None):
+    def __init__(self, session, interval: float = 0.1, hold: int | None = None):
         self.session = session
         self.interval = interval
-        # When given, anything else that takes the foreground is pushed back
-        # down. The helper drops input whose target is not in front -- it has to,
-        # or a delayed keystroke lands in whatever window arrived instead -- so a
-        # window that returns mid-sequence silently eats the whole sequence.
-        # On this runner the agent's terminal came back 1.5s after the prompt.
-        self.allowed = allowed or set()
+        # When given, that window is put back in front whenever something else
+        # takes it. The helper drops input whose target is not in front -- it
+        # has to, or a delayed keystroke lands in whatever window arrived
+        # instead -- so a window that surfaces mid-sequence eats the rest of it.
+        self.hold = hold
         self.interventions: list[dict] = []
         self.samples: list[tuple[float, int, str, str]] = []
         self._stop = threading.Event()
@@ -187,13 +186,19 @@ class ForegroundTrace:
                     round(time.monotonic() - start, 2), hwnd,
                     w.get_window_class(hwnd) or "", (w.get_window_title(hwnd) or "")[:40],
                 ))
-            if self.allowed and hwnd and hwnd not in self.allowed:
+            if self.hold and hwnd != self.hold:
                 self.interventions.append({
-                    "t": round(time.monotonic() - start, 2), "hwnd": hex(hwnd),
+                    "t": round(time.monotonic() - start, 2), "took_it": hex(hwnd),
                     "class": w.get_window_class(hwnd) or "",
                     "title": (w.get_window_title(hwnd) or "")[:40],
                 })
-                user32.ShowWindow(wintypes.HWND(hwnd), SW_HIDE)
+                # Re-assert the target instead of pushing the intruder down.
+                # Hiding or minimising other people's windows turned into a
+                # fight -- 285 interventions in one sequence against a terminal
+                # its owner kept re-activating -- and it is not what the rest of
+                # this suite does: nothing else depends on the Z-order, only on
+                # its own window being in front.
+                user32.SetForegroundWindow(wintypes.HWND(self.hold))
             time.sleep(self.interval)
 
     def __exit__(self, *exc):
@@ -211,41 +216,6 @@ class ForegroundTrace:
             pushed_back_count=len(self.interventions),
         )
         return False
-
-
-def clear_background_windows(session, keep: set[int]) -> list[int]:
-    """Minimises every visible top-level window except the ones named.
-
-    Not tidiness: KeePassXC hides its own window before typing, and Windows
-    then activates whatever is next in the Z-order. That window is what
-    Auto-Type resolves as its target. On a runner the next one was the agent's
-    own terminal -- measured, in the foreground trace -- so the sequence was
-    aimed at a console window, the credential-prompt predicate never matched,
-    and no helper was ever started. On a clean desktop the prompt is next,
-    which is the only reason this passes there.
-
-    Minimised rather than closed: these windows belong to the machine, not to
-    the test, and one of them is the agent that is running the job.
-    """
-    hidden: list[int] = []
-    described = []
-    for snapshot in w.WindowCensus.capture():
-        if not snapshot.is_visible or snapshot.hwnd in keep:
-            continue
-        if not (snapshot.title or "").strip() or snapshot.class_name in SHELL_CLASSES:
-            continue
-        # Hidden, not minimised. Minimising the agent's terminal did not hold:
-        # it was re-activated within 100ms every time, 285 times in one
-        # sequence, and the run turned into a fight over the foreground. A
-        # hidden window is out of the Z-order, so it is neither next after
-        # KeePassXC hides itself nor able to take the foreground back.
-        user32.ShowWindow(wintypes.HWND(snapshot.hwnd), SW_HIDE)
-        hidden.append(snapshot.hwnd)
-        described.append({"hwnd": hex(snapshot.hwnd), "class": snapshot.class_name,
-                          "title": (snapshot.title or "")[:40]})
-    session.log_event("background_cleared", f"{len(described)} windows hidden",
-                      windows=described)
-    return hidden
 
 
 def ensure_foreground(session, window, attempts: int = 6) -> None:
@@ -505,19 +475,17 @@ def run(session) -> int:
                           ok=w.get_foreground_window() == prompt.hwnd)
         session.capture_screenshot("prompt-up")
 
-        # Everything else out of the way first, so that hiding KeePassXC leaves
-        # the prompt as the next window in the Z-order rather than whatever the
-        # machine happens to have open.
-        hidden = clear_background_windows(session, keep={window.hwnd, prompt.hwnd})
         ensure_foreground(session, prompt)
         ensure_foreground(session, window)
         log_window(session, "foreground_before_hotkey", w.get_foreground_window())
         if w.get_foreground_window() != window.hwnd:
             raise AssertionError("KeePassXC was not active when auto-type fired")
 
-    with session.step("perform auto-type"), ForegroundTrace(
-        session, allowed={window.hwnd, prompt.hwnd}
-    ):
+    # The prompt is held in front for the whole sequence: KeePassXC hides its
+    # own window and then resolves "the active window" as its target, so what is
+    # in front during those few hundred milliseconds decides where the
+    # keystrokes go.
+    with session.step("perform auto-type"), ForegroundTrace(session, hold=prompt.hwnd):
         w.send_hotkey("ctrl+shift+v")
         time.sleep(2.5)
         # KeePassXC asks before typing into a window that is not its own. The
@@ -555,9 +523,6 @@ def run(session) -> int:
         session.log_event("credui_outcome", outcome.replace("\n", " | ") or "never submitted",
                           submitted=submitted)
 
-    for hwnd in hidden:
-        user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOW)
-    session.log_event("background_restored", f"{len(hidden)} windows shown again")
     if host.poll() is None:
         host.terminate()
     print(f"VERDICT = {'fix works' if submitted else 'auto-type did not reach the prompt'}",
