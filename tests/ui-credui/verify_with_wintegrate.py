@@ -541,4 +541,18 @@ def run(session) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Its own output is an artifact. Started through run_at_medium_integrity.py
+    # this process inherits no handles, so everything it printed -- including
+    # the traceback of a TypeError in this file -- went nowhere, and the only
+    # trace left was the word "TypeError" in a step_failed event.
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    with open(ARTIFACTS / "harness.log", "w", encoding="utf-8", buffering=1) as stream:
+        sys.stdout = sys.stderr = stream
+        try:
+            code = main()
+        except BaseException:
+            import traceback
+
+            traceback.print_exc(file=stream)
+            raise
+        sys.exit(code)
