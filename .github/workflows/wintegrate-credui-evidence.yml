@@ -419,7 +419,8 @@ jobs:
             --username $env:ENTRY_USERNAME `
             --host-script (Join-Path $env:GITHUB_WORKSPACE 'tests\ui-credui\credui_host.py') `
             --result $result `
-            --artifacts $artifacts
+            --artifacts $artifacts `
+            --dwell 2.5
           Write-Host "harness exit code: $LASTEXITCODE"
           Stop-Process -Id $watcher.Id -Force -ErrorAction SilentlyContinue
           Write-Host "--- helper watcher:"
