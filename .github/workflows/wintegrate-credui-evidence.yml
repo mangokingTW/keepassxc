@@ -1,0 +1,310 @@
+# Records the same run against a patched build and against a control build with
+# the patch removed, so the pair can be looked at rather than described.
+#
+# A reproduction with nothing to compare against proves that the patched build
+# fills in the credential prompt; it does not prove an unpatched one cannot. So
+# both variants are built here by the same steps, from the same Qt, with the
+# same signed helper installed, and the only difference is `src/autotype`.
+#
+# Two things this workflow has to get right or the control lies:
+#
+#   1. **Integrity.** A hosted runner is elevated, and a High-integrity process
+#      may inject into the credential prompt whether or not the patch is
+#      present. The harness is therefore started through
+#      run_at_medium_integrity.py, and everything it launches inherits Medium --
+#      the level an ordinary user actually has. An earlier attempt skipped this
+#      and the reproduction XPASSed, which read as "the bug is gone".
+#   2. **Which binary ran.** The built exe is searched for the patch's own
+#      strings and the result is required to match the variant, in both
+#      directions. A control that quietly contains the fix would pass every
+#      other check here.
+name: "Evidence for #12956 (patched vs control)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: credui-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: 6.8.1
+  CONTROL_REF: origin/wintegrate-credui-12956-control
+  DB_PASSWORD: autotype1
+  ENTRY_TITLE: Windows
+  ENTRY_USERNAME: probeuser
+
+jobs:
+  evidence:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [patched, control]
+    name: "${{ matrix.variant }}"
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      # Full history: the control variant takes src/autotype from another branch,
+      # which a shallow clone cannot resolve.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Remove the patch for the control variant
+        if: matrix.variant == 'control'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git checkout $env:CONTROL_REF -- src/autotype
+          # Printed, because "only src/autotype differs" is a claim this job
+          # makes about itself.
+          git --no-pager diff --stat -- src
+
+      # Also quiets the runner: an onboarding window that owns the foreground
+      # swallows every injected keystroke, and this run is entirely about which
+      # window receives input.
+      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
+        with:
+          wintegrate-version: ">=0.5.10"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache Qt
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Qt
+          key: qt-${{ env.QT_VERSION }}-win64_msvc2022_64
+
+      - name: Install Qt
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pip install aqtinstall
+          aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -O C:\Qt
+          if ($LASTEXITCODE -ne 0) { throw "aqt install-qt failed with $LASTEXITCODE" }
+
+      - name: Export the Qt prefix
+        shell: pwsh
+        run: |
+          $prefix = "C:\Qt\$env:QT_VERSION\msvc2022_64"
+          if (-not (Test-Path $prefix)) { throw "no Qt at $prefix" }
+          "QT_PREFIX=$prefix" >> $env:GITHUB_ENV
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/vcpkg_installed
+            ~/AppData/Local/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+
+      - name: Build KeePassXC
+        shell: pwsh
+        run: |
+          cmd /c ".github\scripts\build-keepassxc-msvc.bat x64"
+          if ($LASTEXITCODE -ne 0) { throw "the build script failed with $LASTEXITCODE" }
+
+      - name: Install into a staging directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'stage'
+          cmake --install build --prefix $stage
+          if ($LASTEXITCODE -ne 0) { throw "cmake --install failed with $LASTEXITCODE" }
+          $exe = Get-ChildItem $stage -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
+          if (-not $exe) { throw "the install produced no KeePassXC.exe" }
+          & "$env:QT_PREFIX\bin\windeployqt.exe" --release --no-translations `
+            --no-system-d3d-compiler --no-opengl-sw $exe.FullName
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with $LASTEXITCODE" }
+          # cmake --install rather than hand-picked DLLs: a bundle assembled by
+          # hand ran but could not unlock any database, because the data
+          # directory and ssl/certs were not where the app looks for them.
+          foreach ($expected in 'share', 'ssl') {
+            if (-not (Test-Path (Join-Path $exe.DirectoryName $expected))) {
+              throw "$expected is missing next to the exe"
+            }
+          }
+          "KPXC_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          "KPXC_CLI=$(Join-Path $exe.DirectoryName 'keepassxc-cli.exe')" >> $env:GITHUB_ENV
+
+      - name: Check the built binary matches the variant
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bytes = [System.IO.File]::ReadAllBytes($env:KPXC_EXE)
+          $wide = [System.Text.Encoding]::Unicode.GetString($bytes)
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          # The pipe name is a wide literal; the warning text is narrow. Both are
+          # only in the patched build.
+          $patched = $wide.Contains('keepassxc-uiaccess-') -or
+                     $ascii.Contains('only accepts input from a privileged process')
+          Write-Host "variant=${{ matrix.variant }} binary_contains_patch=$patched"
+          # Asserted in both directions: a control that quietly contains the fix
+          # would pass everything else in this job.
+          $expected = '${{ matrix.variant }}' -eq 'patched'
+          if ($patched -ne $expected) {
+            throw "the ${{ matrix.variant }} build reports binary_contains_patch=$patched"
+          }
+
+      - name: Build, sign and install the uiAccess helper
+        shell: pwsh
+        working-directory: src/autotype/windows/uiaccess-helper
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Built from the patched branch's copy even for the control variant:
+          # the helper is not the thing under test, and leaving it out would make
+          # "the control has no helper" an alternative explanation for its
+          # failure.
+          if (-not (Test-Path typehelper.c)) {
+            git checkout ${{ github.sha }} -- .
+          }
+          cmd /c "build.bat x64"
+          if ($LASTEXITCODE -ne 0) { throw "build.bat failed with $LASTEXITCODE" }
+
+          $dst = Join-Path $env:ProgramFiles 'keepassxc-uiaccess'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          $exe = Join-Path $dst 'typehelper.exe'
+          Copy-Item typehelper.exe $exe -Force
+
+          # A throwaway certificate, trusted for this run only: uiAccess cares
+          # that the chain is trusted on this machine and that the file sits
+          # where a standard user cannot write, not who signed it.
+          $cert = New-SelfSignedCertificate -Subject "CN=keepassxc uiaccess evidence" `
+            -Type CodeSigningCert -CertStoreLocation Cert:\LocalMachine\My `
+            -NotAfter (Get-Date).AddMonths(1)
+          foreach ($store in 'Root', 'TrustedPublisher') {
+            $s = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, 'LocalMachine')
+            $s.Open('ReadWrite'); $s.Add($cert); $s.Close()
+          }
+          Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256 | Out-Null
+          $sig = Get-AuthenticodeSignature $exe
+          Write-Host "helper signature: $($sig.Status)"
+          if ($sig.Status -ne 'Valid') { throw "the helper is not validly signed" }
+
+      - name: Create the test database
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $db = Join-Path $env:RUNNER_TEMP 'evidence.kdbx'
+          Remove-Item $db -ErrorAction SilentlyContinue
+          $pw = $env:DB_PASSWORD
+
+          # Both directions in one step. A negative control alone -- "the wrong
+          # password fails" -- says nothing about the right one, and a database
+          # whose password is not what the harness thinks reads later as "the
+          # fix did not work".
+          "$pw`n$pw`n" | & $env:KPXC_CLI db-create -p $db
+          if ($LASTEXITCODE -ne 0) { throw "db-create failed with $LASTEXITCODE" }
+          "$pw`n$env:ENTRY_USERNAME`n" | & $env:KPXC_CLI add -u $env:ENTRY_USERNAME `
+            --password-prompt $db $env:ENTRY_TITLE
+          if ($LASTEXITCODE -ne 0) { throw "add failed with $LASTEXITCODE" }
+
+          $shown = "$pw`n" | & $env:KPXC_CLI show -a UserName $db $env:ENTRY_TITLE
+          Write-Host "positive control: exit=$LASTEXITCODE output=$shown"
+          if ($LASTEXITCODE -ne 0 -or $shown -notmatch $env:ENTRY_USERNAME) {
+            throw "the database does not open with the password this run will type"
+          }
+          "not-the-password`n" | & $env:KPXC_CLI ls $db 2>&1 | Out-Null
+          Write-Host "negative control: exit=$LASTEXITCODE"
+          if ($LASTEXITCODE -eq 0) { throw "the database opened with a wrong password" }
+
+          "KPXC_DB=$db" >> $env:GITHUB_ENV
+
+      - name: Run the harness at medium integrity
+        shell: pwsh
+        run: |
+          $artifacts = Join-Path $env:GITHUB_WORKSPACE 'evidence-artifacts'
+          $result = Join-Path $env:RUNNER_TEMP 'credui_result.txt'
+          Remove-Item $result -ErrorAction SilentlyContinue
+
+          # Arguments, not environment variables: run_at_medium_integrity.py
+          # builds the child's environment block from the user token, so
+          # anything exported by this step would not arrive.
+          python tests/ui-credui/run_at_medium_integrity.py `
+            python tests/ui-credui/verify_with_wintegrate.py `
+            --exe $env:KPXC_EXE `
+            --db $env:KPXC_DB `
+            --password $env:DB_PASSWORD `
+            --entry $env:ENTRY_TITLE `
+            --username $env:ENTRY_USERNAME `
+            --host-script (Join-Path $env:GITHUB_WORKSPACE 'tests\ui-credui\credui_host.py') `
+            --result $result `
+            --artifacts $artifacts
+          Write-Host "harness exit code: $LASTEXITCODE"
+          "HARNESS_EXIT=$LASTEXITCODE" >> $env:GITHUB_ENV
+
+      - name: Judge this variant
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $events = Join-Path $env:GITHUB_WORKSPACE 'evidence-artifacts\session_events.json'
+          if (-not (Test-Path $events)) { throw "the harness produced no event timeline" }
+          $log = Get-Content $events -Raw | ConvertFrom-Json
+
+          $outcome = $log | Where-Object { $_.type -eq 'credui_outcome' } | Select-Object -Last 1
+          # Required for both variants: a control that failed earlier -- no
+          # prompt, no entry, KeePassXC never in the foreground -- has not
+          # demonstrated anything about the patch, and its exit code looks the
+          # same as a real failure to submit.
+          if (-not $outcome) {
+            throw "the run never reached the point of submitting the prompt; check the timeline"
+          }
+          $integrity = ($log | Where-Object { $_.type -eq 'keepassxc_window' } |
+                        Select-Object -Last 1).integrity
+          Write-Host "keepassxc integrity: $integrity"
+          Write-Host "credui outcome: $($outcome.message) submitted=$($outcome.submitted)"
+          if ($integrity -notlike 'Medium*') {
+            throw "KeePassXC ran at '$integrity'; at High integrity the prompt accepts input with or without the patch"
+          }
+
+          $expected = '${{ matrix.variant }}' -eq 'patched'
+          if ($outcome.submitted -ne $expected) {
+            throw "${{ matrix.variant }}: expected submitted=$expected, measured $($outcome.submitted)"
+          }
+          "SUBMITTED=$($outcome.submitted)" >> $env:GITHUB_ENV
+
+      - name: Upload the recording and the timeline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: credui-evidence-${{ matrix.variant }}
+          path: |
+            evidence-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  pair:
+    name: the pair
+    needs: evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: credui-evidence-*
+          path: evidence
+
+      # The two jobs above each check their own half. This job exists so that
+      # "one of them did not run" cannot look like a pass: a matrix leg that is
+      # skipped or cancelled leaves no artifact, and the summary line for the
+      # workflow would otherwise still be green.
+      - name: Require both halves
+        run: |
+          set -o pipefail
+          for variant in patched control; do
+            events="evidence/credui-evidence-$variant/session_events.json"
+            test -f "$events" || { echo "missing timeline for $variant"; exit 1; }
+            submitted=$(jq -r '[.[] | select(.type == "credui_outcome")] | last | .submitted' "$events")
+            echo "$variant: submitted=$submitted"
+            case "$variant:$submitted" in
+              patched:true|control:false) ;;
+              *) echo "unexpected result for $variant"; exit 1 ;;
+            esac
+          done
+          echo "the pair holds: the patched build submits the prompt and the control does not"
