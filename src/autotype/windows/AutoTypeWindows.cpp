@@ -38,6 +38,9 @@ AutoTypePlatformWin::AutoTypePlatformWin()
 {
 }
 
+// Out of line so that QScopedPointer sees the complete UiAccessInjector.
+AutoTypePlatformWin::~AutoTypePlatformWin() = default;
+
 //
 // Test if os version is Windows 7 or later
 //

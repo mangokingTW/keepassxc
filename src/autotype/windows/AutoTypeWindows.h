@@ -38,6 +38,11 @@ class AutoTypePlatformWin : public QObject, public AutoTypePlatformInterface
 
 public:
     explicit AutoTypePlatformWin();
+    // Declared here and defined in the .cpp on purpose: QScopedPointer needs the
+    // complete type where the destructor is instantiated, and an implicit one in
+    // this header only has the forward declaration --
+    //   error C2027: use of undefined type 'UiAccessInjector'
+    ~AutoTypePlatformWin() override;
     bool isAvailable() override;
     QStringList windowTitles() override;
     WId activeWindow() override;
