@@ -155,13 +155,17 @@ def medium_integrity_submission():
             window.hwnd, f"{PROBE_USER}\t{PROBE_PASSWORD}\n", report_path
         )
         print(f"de-elevated typer report:\n{report}")
-        if "elevation=not-elevated" not in report:
+        # Medium, not "not elevated": lowering a token's integrity level leaves
+        # its administrator privileges in place, so the elevation flag still
+        # reads "elevated" on a child that was successfully dropped to Medium.
+        # Asserting the flag reported a working de-elevation as a failure.
+        if "integrity=0x2000" not in report:
             # Skip rather than fail: nothing was measured. Failing would be read
             # as a finding, and an xfail marker on the test would absorb it
             # entirely -- which is how an elevated run first came back green.
             pytest.skip(
-                "the typer could not be dropped to ordinary integrity, so the ordinary "
-                f"case was not measured. Report was: {report!r}"
+                "the typer is not at the Medium integrity level, so the ordinary case "
+                f"was not measured. Report was: {report!r}"
             )
         assert "typed=yes" in report, f"the typer never delivered its keystrokes: {report!r}"
         yield prompt
