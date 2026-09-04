@@ -105,7 +105,9 @@ jobs:
           path: |
             build/vcpkg_installed
             ~/AppData/Local/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          # The triplet is in the key: switching between the static and dynamic
+          # CRT produces different binaries under the same manifest.
+          key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
 
       # The runner ships vcpkg; the repo is in manifest mode, so configure
       # installs what vcpkg.json asks for.

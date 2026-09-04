@@ -28,7 +28,11 @@ cmake -S . -B build -G Ninja ^
   -DCMAKE_C_COMPILER=cl ^
   -DCMAKE_CXX_COMPILER=cl ^
   -DCMAKE_TOOLCHAIN_FILE="%VCPKG_INSTALLATION_ROOT%\scripts\buildsystems\vcpkg.cmake" ^
-  -DVCPKG_TARGET_TRIPLET=%ARCH%-windows-static ^
+rem Dynamic CRT, not -static: vcpkg's static triplet builds botan with /MT while
+rem Qt from aqt and KeePassXC's own objects are /MD, and the link fails with
+rem   botan-3.lib: error LNK2038: mismatch detected for 'RuntimeLibrary':
+rem   'MT_StaticRelease' doesn't match 'MD_DynamicRelease'
+  -DVCPKG_TARGET_TRIPLET=%ARCH%-windows ^
   -DCMAKE_PREFIX_PATH="%QT_PREFIX%" ^
   -DWITH_TESTS=OFF ^
   -DWITH_XC_AUTOTYPE=ON ^
