@@ -1,0 +1,85 @@
+# Builds KeePassXC for Windows in GitHub Actions.
+#
+# Upstream has no Actions-based Windows build -- releases come from other
+# infrastructure -- so this exists to answer one question before anything else
+# is designed around it: can a patched KeePassXC be built and then tested in the
+# same run? Without that, "fix it and verify the fix" can only ever be
+# demonstrated with a stand-in binary, which is not the same claim.
+#
+# Build only, on purpose. The verification workflow stays separate until this
+# one is green.
+name: Build KeePassXC (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wintegrate-credui-12956]
+
+permissions:
+  contents: read
+
+env:
+  QT_VERSION: 6.8.1
+
+jobs:
+  build:
+    name: build x64
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # aqtinstall rather than a third-party action: one less thing to trust in
+      # a repository that is not mine, and the version is pinned here.
+      - name: Install Qt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pip install aqtinstall
+          aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 `
+            -m qtsvg qtnetworkauth -O C:\Qt
+          $prefix = "C:\Qt\$env:QT_VERSION\msvc2022_64"
+          if (-not (Test-Path $prefix)) { throw "Qt did not land at $prefix" }
+          "QT_PREFIX=$prefix" >> $env:GITHUB_ENV
+          Write-Host "Qt at $prefix"
+
+      # The runner ships vcpkg; the repo is in manifest mode, so configure
+      # installs what vcpkg.json asks for.
+      - name: Configure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake"
+          if (-not (Test-Path $vcpkg)) { throw "no vcpkg toolchain at $vcpkg" }
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkg" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DCMAKE_PREFIX_PATH="$env:QT_PREFIX" `
+            -DWITH_TESTS=OFF `
+            -DWITH_XC_AUTOTYPE=ON
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with $LASTEXITCODE" }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build failed with $LASTEXITCODE" }
+          Get-ChildItem build -Recurse -Filter "KeePassXC.exe" | ForEach-Object {
+            Write-Host "built: $($_.FullName)  $([math]::Round($_.Length / 1MB, 1)) MB"
+          }
+
+      - name: Upload the build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keepassxc-windows-x64
+          path: |
+            build/src/KeePassXC.exe
+            build/src/keepassxc-cli.exe
+          if-no-files-found: warn
+          retention-days: 7
