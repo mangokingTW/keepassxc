@@ -377,6 +377,13 @@ jobs:
             ''
             '[GUI]'
             'CheckForUpdates=false'
+            ''
+            '[Security]'
+            # No confirmation dialog: it is one more window between the hotkey
+            # and the target, and the window that is in front while KeePassXC
+            # resolves its target is what decides where the keystrokes go.
+            # DatabaseWidget only asks when this is true.
+            'AutotypeAsk=false'
           ) | Set-Content -Path $ini -Encoding ASCII
           Write-Host "wrote $ini"
           Get-Content $ini | Write-Host
