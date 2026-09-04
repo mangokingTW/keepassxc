@@ -88,13 +88,17 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $vcpkg = "$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake"
           if (-not (Test-Path $vcpkg)) { throw "no vcpkg toolchain at $vcpkg" }
+          # KPXC_FEATURE_DOCS=OFF: the offline docs need asciidoctor, which the
+          # runner does not have, and they are not what is under test --
+          #   CMake Error at docs/CMakeLists.txt:18: asciidoctor is required
           cmake -S . -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$vcpkg" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
             -DCMAKE_PREFIX_PATH="$env:QT_PREFIX" `
             -DWITH_TESTS=OFF `
-            -DWITH_XC_AUTOTYPE=ON
+            -DWITH_XC_AUTOTYPE=ON `
+            -DKPXC_FEATURE_DOCS=OFF
           if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with $LASTEXITCODE" }
 
       - name: Build
