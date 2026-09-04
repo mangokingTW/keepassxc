@@ -138,6 +138,36 @@ def display_affinity(hwnd: int) -> str:
     return DISPLAY_AFFINITY.get(value.value, hex(value.value))
 
 
+def ensure_foreground(session, window, attempts: int = 6) -> None:
+    """Puts the window in front, and says who was there when it was not.
+
+    A hosted runner is not an empty desktop. This run found the agent's own log
+    window filling the screen and holding the foreground, so the password went
+    there and the database simply stayed locked -- with every call in the
+    harness reporting success. The window that has the foreground is minimised
+    and the request repeated, which is bounded and leaves a record of what was
+    in the way.
+
+    wintegrate's own runner sanitisation does not cover it: it is gated on
+    `env.is_desktop`, and `windows-latest` is Windows Server.
+    """
+    for attempt in range(attempts):
+        window.set_foreground()
+        time.sleep(0.4)
+        foreground = w.get_foreground_window()
+        if foreground == window.hwnd:
+            if attempt:
+                session.log_event("foreground", "recovered", attempts=attempt + 1)
+            return
+        log_window(session, "foreground_thief", foreground)
+        user32.ShowWindow(wintypes.HWND(foreground), 6)  # SW_MINIMIZE
+        time.sleep(0.4)
+    raise AssertionError(
+        f"could not put {window.title!r} in front after {attempts} attempts; "
+        "every keystroke below would have gone to whatever holds the foreground"
+    )
+
+
 def allow_screen_capture(session, window) -> None:
     """Turns off KeePassXC's own anti-screenshot protection, and verifies it.
 
@@ -260,7 +290,11 @@ def main() -> int:
     # This run's output is evidence someone reads, so everything stays on one
     # desktop.
     with w.Session(w.SessionConfig(artifact_dir=ARTIFACTS, record_video=True,
-                                   isolated_virtual_desktop=False)) as session:
+                                   isolated_virtual_desktop=False,
+                                   # 'auto' is gated on env.is_desktop, and
+                                   # windows-latest is Windows Server -- so the
+                                   # runner cleanup silently did not run.
+                                   sanitize_runner=bool(os.environ.get("CI")))) as session:
         return run(session)
 
 
@@ -284,7 +318,7 @@ def run(session) -> int:
                          stdout=stderr_log, stderr=subprocess.STDOUT)
         window = session.find_window(title_pattern="KeePassXC", timeout=30)
         log_window(session, "keepassxc_window", window.hwnd)
-        window.set_foreground()
+        ensure_foreground(session, window)
 
         if is_locked(window):
             field = window.find_text_input()
@@ -345,12 +379,12 @@ def run(session) -> int:
         # from here: the hotkey is injected input at medium integrity, so UIPI
         # drops it before KeePassXC sees it -- measured, a run reached
         # "prompt is foreground" and then no auto-type happened at all.
-        prompt.set_foreground()
+        ensure_foreground(session, prompt)
         session.log_event("prompt_activated", "prompt is the foreground window",
                           ok=w.get_foreground_window() == prompt.hwnd)
         session.capture_screenshot("prompt-up")
 
-        window.set_foreground()
+        ensure_foreground(session, window)
         log_window(session, "foreground_before_hotkey", w.get_foreground_window())
         if w.get_foreground_window() != window.hwnd:
             raise AssertionError("KeePassXC was not active when auto-type fired")
