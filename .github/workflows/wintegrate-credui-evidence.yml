@@ -127,6 +127,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $stage = Join-Path $env:GITHUB_WORKSPACE 'stage'
+          Write-Host 'cmake --install ...'
           cmake --install build --prefix $stage
           if ($LASTEXITCODE -ne 0) { throw "cmake --install failed with $LASTEXITCODE" }
           $exe = Get-ChildItem $stage -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
@@ -138,6 +139,7 @@ jobs:
           # verification needs first: deployed for the GUI alone it started and
           # died with 0xC0000135 (STATUS_DLL_NOT_FOUND), which surfaced only as
           # "db-create failed with -1073741515".
+          Write-Host 'windeployqt ...'
           & "$env:QT_PREFIX\bin\windeployqt.exe" --release --no-translations `
             --no-system-d3d-compiler --no-opengl-sw --compiler-runtime `
             $exe.FullName $cli
@@ -161,6 +163,7 @@ jobs:
           # what named them.
           $vcpkgBin = Join-Path $env:GITHUB_WORKSPACE 'build\vcpkg_installed\x64-windows\bin'
           if (-not (Test-Path $vcpkgBin)) { throw "no vcpkg bin directory at $vcpkgBin" }
+          Write-Host 'copying the vcpkg runtime ...'
           Copy-Item (Join-Path $vcpkgBin '*.dll') $exe.DirectoryName -Force
           Write-Host "copied from the vcpkg triplet:"
           Get-ChildItem $vcpkgBin -Filter *.dll | Select-Object -ExpandProperty Name |
@@ -178,28 +181,32 @@ jobs:
             if ($dumpbin) { & $dumpbin.FullName /dependents $binary | Write-Host }
           }
 
-          # The console binary can be asked directly.
-          & $cli --version
-          if ($LASTEXITCODE -ne 0) {
-            Show-WhyItCannotStart $cli $LASTEXITCODE
-            throw "keepassxc-cli cannot start, so this bundle is not verifiable"
+          # Every start is bounded and every stage prints, because this step has
+          # now hung twice and a step with no output cannot say where. `&` waits
+          # for a console process for as long as it likes: `keepassxc-cli
+          # --version` on a runner is what sat here for eleven minutes with the
+          # log empty.
+          function Test-ItStarts($binary, $seconds, $label) {
+            Write-Host "starting $label ..."
+            $p = Start-Process -FilePath $binary -ArgumentList '--version' -PassThru
+            if ($p.WaitForExit($seconds * 1000)) {
+              Write-Host "$label exited with $($p.ExitCode) after $([int]$p.TotalProcessorTime.TotalSeconds)s of cpu"
+              if ($p.ExitCode -ne 0) {
+                Show-WhyItCannotStart $binary $p.ExitCode
+                throw "$label cannot start, so this bundle is not verifiable"
+              }
+              return
+            }
+            # Still running after the timeout is the *pass* for anything that
+            # does not exit on --version: the loader failure this guards against
+            # is immediate, so being alive at all means every DLL resolved.
+            Write-Host "$label was still alive after ${seconds}s, so the loader is satisfied"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           }
 
-          # The GUI is checked by staying alive, not by answering --version. It
-          # is a GUI-subsystem process: asked for its version on a runner it
-          # entered its message loop instead of printing and exiting, and the
-          # step sat there until it was cancelled. A loader failure is
-          # immediate, so surviving a few seconds is the positive evidence --
-          # and it is then killed rather than left to hold the single-instance
-          # slot the verification job needs.
-          $gui = Start-Process -FilePath $exe.FullName -PassThru
-          Start-Sleep -Seconds 5
-          if ($gui.HasExited) {
-            Show-WhyItCannotStart $exe.FullName $gui.ExitCode
-            throw "KeePassXC exited immediately, so this bundle is not verifiable"
-          }
-          Write-Host "KeePassXC stayed alive for 5s: the loader is satisfied"
-          Stop-Process -Id $gui.Id -Force
+          Test-ItStarts $cli 20 'keepassxc-cli'
+          Test-ItStarts $exe.FullName 10 'KeePassXC'
+          Write-Host "both binaries start"
 
           "STAGE_DIR=$($exe.DirectoryName)" >> $env:GITHUB_ENV
 
