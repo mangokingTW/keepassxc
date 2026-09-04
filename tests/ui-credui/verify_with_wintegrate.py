@@ -550,7 +550,18 @@ def run(session) -> int:
             session.capture_screenshot("confirmation-dialog")
             if DWELL:
                 time.sleep(DWELL)
-            accept_button(session, dialog.hwnd).invoke()
+            # Clicked, not invoked. invoke() goes through the UIA pattern and
+            # needs no window to be visible, so it dismissed a dialog that had
+            # never been drawn on top of anything -- the step is missing from
+            # the recording entirely. A click needs real coordinates and the
+            # window in front, which is also what a user does, and the recorder
+            # draws the pointer and the click where it landed. click() raises
+            # when the element has no rectangle, so it cannot silently do
+            # nothing either.
+            button = accept_button(session, dialog.hwnd)
+            session.log_event("confirmation_click", f"clicking {button.name!r}",
+                              rect=button.bounding_rectangle)
+            button.click()
 
         # Held in front only from here: KeePassXC hides its own window after the
         # dialog is answered and then resolves "the active window" as its
