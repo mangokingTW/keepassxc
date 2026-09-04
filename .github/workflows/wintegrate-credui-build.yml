@@ -122,38 +122,42 @@ jobs:
           if (-not $exe) { throw "no KeePassXC.exe under build/" }
           Write-Host "built: $($exe.FullName)  $([math]::Round($exe.Length / 1MB, 1)) MB"
 
-      # A bare KeePassXC.exe cannot run: the dependencies are dynamic now, so Qt
-      # and the vcpkg libraries have to travel with it. Without this the artifact
-      # is only useful for proving that the tree compiles.
-      - name: Stage a runnable bundle
+      # cmake --install, not a hand-picked set of DLLs. The first version copied
+      # KeePassXC.exe plus what windeployqt brought, and the GUI then failed to
+      # unlock any database on the test VM while its own keepassxc-cli opened
+      # the same files -- the install rules place the data directory, ssl/certs
+      # and the plugins where the application looks for them, and guessing that
+      # layout by hand is how the difference went unnoticed.
+      - name: Install into a staging directory
         if: success()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $stage = Join-Path $env:GITHUB_WORKSPACE 'stage'
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          cmake --install build --prefix $stage
+          if ($LASTEXITCODE -ne 0) { throw "cmake --install failed with $LASTEXITCODE" }
 
-          $exe = Get-ChildItem build -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
-          if (-not $exe) { throw "no KeePassXC.exe to stage" }
-          Copy-Item $exe.FullName $stage
-          Get-ChildItem build -Recurse -Filter 'keepassxc-cli.exe' |
-            Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName $stage }
-
-          # The helper, signed by the step above, so the bundle can exercise the
-          # delegated path where it is needed.
-          if ($env:CREDUI_UIACCESS_HELPER -and (Test-Path $env:CREDUI_UIACCESS_HELPER)) {
-            Copy-Item $env:CREDUI_UIACCESS_HELPER (Join-Path $stage 'keepassxc-uiaccess-helper.exe')
-          }
+          $exe = Get-ChildItem $stage -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
+          if (-not $exe) { throw "the install produced no KeePassXC.exe" }
+          Write-Host "installed exe: $($exe.FullName)"
 
           & "$env:QT_PREFIX\bin\windeployqt.exe" --release --no-translations `
-            --no-system-d3d-compiler --no-opengl-sw (Join-Path $stage 'KeePassXC.exe')
+            --no-system-d3d-compiler --no-opengl-sw $exe.FullName
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with $LASTEXITCODE" }
 
-          $vcpkgBin = Join-Path $env:GITHUB_WORKSPACE 'build\vcpkg_installed\x64-windows\bin'
-          if (Test-Path $vcpkgBin) {
-            Copy-Item (Join-Path $vcpkgBin '*.dll') $stage -Force
+          # The signed helper, so the delegated path can be exercised from the
+          # bundle without a separate install step.
+          if ($env:CREDUI_UIACCESS_HELPER -and (Test-Path $env:CREDUI_UIACCESS_HELPER)) {
+            Copy-Item $env:CREDUI_UIACCESS_HELPER (Join-Path $exe.DirectoryName 'keepassxc-uiaccess-helper.exe')
           }
 
+          # Reported rather than assumed: the data directory is what the GUI
+          # needs and what the hand-made bundle was missing.
+          foreach ($expected in 'share', 'ssl') {
+            $found = Test-Path (Join-Path $exe.DirectoryName $expected)
+            Write-Host "  $expected present next to the exe: $found"
+          }
           $count = (Get-ChildItem $stage -Recurse -File | Measure-Object).Count
           $size = [math]::Round(((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
           Write-Host "staged $count files, $size MB"
