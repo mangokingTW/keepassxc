@@ -28,7 +28,13 @@ import time
 from pathlib import Path
 
 import pytest
-from credui_harness import BROKER, CredentialPrompt, broker_pids
+from credui_harness import (
+    BROKER,
+    CredentialPrompt,
+    broker_pids,
+    is_elevated,
+    type_at_medium_integrity,
+)
 from wintegrate.element import UiaElement
 from wintegrate.interop import send_keys
 
@@ -119,6 +125,37 @@ def test_dialog_is_the_brokered_one():
         print(f"UIA Edit children: {len(fields)}")
 
 
+@pytest.fixture
+def medium_integrity_submission():
+    """A raised dialog that a non-elevated process has just typed into.
+
+    The preconditions live here rather than in the test on purpose. A strict
+    xfail swallows *any* failure in the test body, so a broken de-elevation
+    would be recorded as "the bug reproduced" -- which happened: a
+    PermissionError from pytest's own tmp_path was reported as an xfail.
+    A failure in a fixture is an error instead, and errors are loud.
+    """
+    # Not tmp_path: pytest's numbered temp directories were created by an
+    # elevated run earlier and scanning them raised PermissionError for an
+    # ordinary user.
+    root = Path(os.environ.get("RUNNER_TEMP") or os.environ.get("TEMP") or r"C:\Users\Public")
+    report_path = root / "credui_typer_report.txt"
+
+    with CredentialPrompt() as prompt:
+        window = prompt.window
+        print(f"test process elevated: {is_elevated()}")
+        report = type_at_medium_integrity(
+            window.hwnd, f"{PROBE_USER}\t{PROBE_PASSWORD}\n", report_path
+        )
+        print(f"de-elevated typer report:\n{report}")
+        assert "elevation=not-elevated" in report, (
+            f"the typer was not running at ordinary integrity, so this would measure the "
+            f"wrong thing; report was: {report!r}"
+        )
+        assert "typed=yes" in report, f"the typer never delivered its keystrokes: {report!r}"
+        yield prompt
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
@@ -127,24 +164,22 @@ def test_dialog_is_the_brokered_one():
         "fails loudly if it ever starts working rather than passing unnoticed."
     ),
 )
-def test_injected_input_reaches_the_dialog():
-    """The reproduction, written as the behaviour a user expects.
+def test_injected_input_reaches_the_dialog(medium_integrity_submission):
+    """The reproduction, reduced to the one claim that can be wrong.
 
-    KeePassXC's auto-type is exactly this call: AutoTypeWindows.cpp sends
-    KEYEVENTF_UNICODE and KEYEVENTF_SCANCODE through SendInput from the ordinary
-    process. So a difference in outcome between this and the helper below is a
-    difference in privilege, not in API.
+    KeePassXC's auto-type is exactly the call the fixture made:
+    AutoTypeWindows.cpp sends KEYEVENTF_UNICODE and KEYEVENTF_SCANCODE through
+    SendInput from an ordinary process. A difference in outcome between this and
+    the uiAccess test below is a difference in privilege, not in API.
     """
-    with CredentialPrompt() as prompt:
-        _submit()
-        outcome = prompt.outcome()
-        print(f"credui outcome: {outcome!r}")
-        assert "RESULT=0" in outcome, (
-            "the dialog was never submitted: CredUIPromptForWindowsCredentials had not "
-            "returned by the time the wait expired, which is what a swallowed keystroke "
-            "looks like from outside the dialog"
-        )
-        assert PROBE_USER in outcome, f"submitted, but not with the injected text: {outcome!r}"
+    outcome = medium_integrity_submission.outcome()
+    print(f"credui outcome: {outcome!r}")
+    assert "RESULT=0" in outcome, (
+        "the dialog was never submitted: CredUIPromptForWindowsCredentials had not "
+        "returned by the time the wait expired, which is what a swallowed keystroke "
+        "looks like from outside the dialog"
+    )
+    assert PROBE_USER in outcome, f"submitted, but not with the injected text: {outcome!r}"
 
 
 @pytest.mark.skipif(

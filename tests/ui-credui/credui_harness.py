@@ -40,14 +40,105 @@ def dialogs() -> list:
     ]
 
 
+def powershell(script: str, timeout: float = 180.0) -> str:
+    done = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if done.returncode != 0:
+        print(f"powershell exited {done.returncode}: {done.stderr.strip()[:400]}")
+    return (done.stdout or "").strip()
+
+
 def broker_pids() -> list[str]:
-    listed = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-         f"(Get-Process -Name {BROKER} -ErrorAction SilentlyContinue | "
-         "Select-Object -ExpandProperty Id) -join ','"],
-        capture_output=True, text=True, timeout=60,
-    ).stdout.strip()
+    listed = powershell(
+        f"(Get-Process -Name {BROKER} -ErrorAction SilentlyContinue | "
+        "Select-Object -ExpandProperty Id) -join ','"
+    )
     return [p for p in listed.split(",") if p]
+
+
+def is_elevated() -> bool:
+    """Whether this process holds an elevated token.
+
+    The integrity level is the variable that decides this bug, and a GitHub
+    hosted runner is administrator -- so a test that types in-process there
+    measures the *working* path and the reproduction inverts. Everything that
+    depends on privilege branches on this rather than assuming.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TOKEN_QUERY = 0x0008
+    TOKEN_ELEVATION = 20
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Declared, not inferred. Without argtypes ctypes passes the process handle
+    # as a C int and raises "OverflowError: int too long to convert" -- which
+    # surfaces as a broken test rather than as a missing declaration.
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), TOKEN_QUERY,
+                                     ctypes.byref(token)):
+        return False
+    elevated = wintypes.DWORD(0)
+    size = wintypes.DWORD(0)
+    ok = advapi32.GetTokenInformation(
+        token, TOKEN_ELEVATION, ctypes.byref(elevated), ctypes.sizeof(elevated),
+        ctypes.byref(size),
+    )
+    if not ok:
+        return False
+    return bool(elevated.value)
+
+
+def type_at_medium_integrity(hwnd: int, sequence: str, report: Path, timeout: float = 90.0) -> str:
+    """Types `sequence` into `hwnd` from a *non-elevated* process, and reports.
+
+    Uses a scheduled task registered with RunLevel Limited, which is the
+    reliable way to drop from an elevated session to an ordinary one --
+    CreateProcess cannot lower its own integrity level, and `runas
+    /trustlevel:0x20000` yields a restricted token rather than a plain user one.
+    """
+    if report.exists():
+        report.unlink()
+
+    script = Path(__file__).with_name("type_into.py")
+    python = sys.executable
+    task = "CredUiMediumIntegrityTyper"
+    argument = f'"{script}" {hwnd} "{sequence}" "{report}"'
+
+    powershell(
+        "$ErrorActionPreference='Stop'; "
+        f"$a = New-ScheduledTaskAction -Execute '{python}' -Argument '{argument}'; "
+        "$p = New-ScheduledTaskPrincipal -UserId \"$env:USERDOMAIN\\$env:USERNAME\" "
+        "-LogonType Interactive -RunLevel Limited; "
+        f"Register-ScheduledTask -TaskName {task} -Action $a -Principal $p -Force | Out-Null; "
+        f"Start-ScheduledTask -TaskName {task}"
+    )
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if report.exists():
+            text = report.read_text(encoding="utf-8", errors="replace").strip()
+            if "typed=" in text:
+                powershell(f"Unregister-ScheduledTask -TaskName {task} -Confirm:$false "
+                           "-ErrorAction SilentlyContinue")
+                return text
+        time.sleep(0.5)
+    powershell(f"Unregister-ScheduledTask -TaskName {task} -Confirm:$false -ErrorAction SilentlyContinue")
+    return "<the de-elevated typer never reported>"
 
 
 class CredentialPrompt:
