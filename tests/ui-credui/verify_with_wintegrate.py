@@ -191,6 +191,33 @@ class ForegroundTrace:
         return False
 
 
+def clear_background_windows(session, keep: set[int]) -> None:
+    """Minimises every visible top-level window except the ones named.
+
+    Not tidiness: KeePassXC hides its own window before typing, and Windows
+    then activates whatever is next in the Z-order. That window is what
+    Auto-Type resolves as its target. On a runner the next one was the agent's
+    own terminal -- measured, in the foreground trace -- so the sequence was
+    aimed at a console window, the credential-prompt predicate never matched,
+    and no helper was ever started. On a clean desktop the prompt is next,
+    which is the only reason this passes there.
+
+    Minimised rather than closed: these windows belong to the machine, not to
+    the test, and one of them is the agent that is running the job.
+    """
+    minimised = []
+    for snapshot in w.WindowCensus.capture():
+        if not snapshot.is_visible or snapshot.hwnd in keep:
+            continue
+        if not (snapshot.title or "").strip():
+            continue
+        user32.ShowWindow(wintypes.HWND(snapshot.hwnd), 6)  # SW_MINIMIZE
+        minimised.append({"hwnd": hex(snapshot.hwnd), "class": snapshot.class_name,
+                          "title": (snapshot.title or "")[:40]})
+    session.log_event("background_cleared", f"{len(minimised)} windows minimised",
+                      windows=minimised)
+
+
 def ensure_foreground(session, window, attempts: int = 6) -> None:
     """Puts the window in front, and says who was there when it was not.
 
@@ -448,6 +475,11 @@ def run(session) -> int:
                           ok=w.get_foreground_window() == prompt.hwnd)
         session.capture_screenshot("prompt-up")
 
+        # Everything else out of the way first, so that hiding KeePassXC leaves
+        # the prompt as the next window in the Z-order rather than whatever the
+        # machine happens to have open.
+        clear_background_windows(session, keep={window.hwnd, prompt.hwnd})
+        ensure_foreground(session, prompt)
         ensure_foreground(session, window)
         log_window(session, "foreground_before_hotkey", w.get_foreground_window())
         if w.get_foreground_window() != window.hwnd:
