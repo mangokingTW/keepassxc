@@ -342,6 +342,13 @@ jobs:
           Write-Host "negative control: exit=$LASTEXITCODE"
           if ($LASTEXITCODE -eq 0) { throw "the database opened with a wrong password" }
 
+          # The negative control leaves $LASTEXITCODE at 1 on purpose, and a
+          # pwsh step's own exit status is that variable -- so this step failed
+          # with both of its controls having passed. Reset it deliberately, and
+          # note that every real failure above is an explicit throw rather than
+          # an exit code, so nothing is being hidden by this line.
+          $global:LASTEXITCODE = 0
+
           "KPXC_DB=$db" >> $env:GITHUB_ENV
 
       - name: Run the harness at medium integrity
@@ -365,6 +372,13 @@ jobs:
             --result $result `
             --artifacts $artifacts
           Write-Host "harness exit code: $LASTEXITCODE"
+          # Expected to be non-zero for the control variant -- the harness
+          # reports "the prompt was never submitted" that way -- and this step
+          # is not the judge. The next one reads the event timeline, which can
+          # tell "did not submit" apart from "never got that far"; an exit code
+          # cannot. Same reason as above: reset so the step does not fail on a
+          # result it is not judging.
+          $global:LASTEXITCODE = 0
 
       - name: Judge this variant
         shell: pwsh
