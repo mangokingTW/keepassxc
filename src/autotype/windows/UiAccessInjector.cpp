@@ -26,8 +26,8 @@
 
 namespace
 {
-    const char* kCredentialDialogClass = "Credential Dialog Xaml Host";
-    const char* kBrokerImage = "credentialuibroker.exe";
+    const char* s_credentialDialogClass = "Credential Dialog Xaml Host";
+    const char* s_brokerImage = "credentialuibroker.exe";
 
     QString processImageName(DWORD pid)
     {
@@ -79,14 +79,14 @@ bool UiAccessInjector::isBrokeredCredentialDialog(HWND window)
     if (::GetClassNameW(window, className, 255) <= 0) {
         return false;
     }
-    if (QString::fromWCharArray(className) != QLatin1String(kCredentialDialogClass)) {
+    if (QString::fromWCharArray(className) != QLatin1String(s_credentialDialogClass)) {
         return false;
     }
     // The class name alone would match a look-alike in any process, and this
     // decides whether a privileged helper is started.
     DWORD pid = 0;
     ::GetWindowThreadProcessId(window, &pid);
-    return processImageName(pid) == QLatin1String(kBrokerImage);
+    return processImageName(pid) == QLatin1String(s_brokerImage);
 }
 
 bool UiAccessInjector::begin(HWND target)
@@ -101,8 +101,7 @@ bool UiAccessInjector::begin(HWND target)
         return false;
     }
 
-    const auto name = QStringLiteral("keepassxc-uiaccess-%1")
-                          .arg(QUuid::createUuid().toString(QUuid::Id128));
+    const auto name = QStringLiteral("keepassxc-uiaccess-%1").arg(QUuid::createUuid().toString(QUuid::Id128));
     const auto pipeName = QStringLiteral("\\\\.\\pipe\\%1").arg(name);
 
     // Only the current user may open it. The helper bypasses UIPI on request,
@@ -124,9 +123,7 @@ bool UiAccessInjector::begin(HWND target)
     // issued by the AppInfo service, and only the shell path consults it. The
     // helper also does not inherit this process's environment, so everything it
     // needs is an argument.
-    const auto arguments = QStringLiteral("--pipe %1 --target %2")
-                               .arg(name)
-                               .arg(reinterpret_cast<quintptr>(target));
+    const auto arguments = QStringLiteral("--pipe %1 --target %2").arg(name).arg(reinterpret_cast<quintptr>(target));
 
     SHELLEXECUTEINFOW info{};
     info.cbSize = sizeof(info);

@@ -23,6 +23,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 import wintegrate as w
+from wintegrate.interop import SW_HIDE, SW_SHOW
 
 # Settings come from the command line first and the environment second. The
 # command line is not a convenience: on a hosted runner this harness is started
@@ -65,7 +66,9 @@ DWELL = ARGS.dwell
 
 PROMPT_CLASS = "Credential Dialog Xaml Host"
 
-SW_HIDE, SW_SHOW, SW_MINIMIZE = 0, 5, 6
+# From wintegrate rather than redefined here; SW_MINIMIZE is the one it does
+# not export.
+SW_MINIMIZE = 6
 
 # The shell's own windows are left alone: hiding the taskbar or the desktop
 # would outlast this process if anything went wrong afterwards.
@@ -142,15 +145,15 @@ def log_window(session, event_type: str, hwnd: int) -> None:
     )
 
 
-DISPLAY_AFFINITY = {0: "WDA_NONE", 1: "WDA_MONITOR", 0x11: "WDA_EXCLUDEFROMCAPTURE"}
-user32.GetWindowDisplayAffinity.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-
-
 def display_affinity(hwnd: int) -> str:
-    value = wintypes.DWORD()
-    if not user32.GetWindowDisplayAffinity(wintypes.HWND(hwnd), ctypes.byref(value)):
-        return f"unreadable (err={ctypes.get_last_error()})"
-    return DISPLAY_AFFINITY.get(value.value, hex(value.value))
+    """Whether the window has asked Windows to keep it out of captures.
+
+    Through wintegrate rather than a local ctypes copy: the reading exists
+    there (0.5.11) because this run is what found the need for it, and `None`
+    deliberately means "could not be read" rather than "not excluded".
+    """
+    affinity = w.get_window_display_affinity(hwnd)
+    return "unreadable" if affinity is None else affinity.name
 
 
 class ForegroundTrace:
@@ -313,7 +316,7 @@ def allow_screen_capture(session, window) -> None:
     object path, and the labels are localised.
     """
     before = display_affinity(window.hwnd)
-    if before == "WDA_NONE":
+    if before == w.DisplayAffinity.NONE.name:
         session.log_event("screen_capture", "already capturable", affinity=before)
         return
 
@@ -332,7 +335,7 @@ def allow_screen_capture(session, window) -> None:
     session.log_event("screen_capture", f"{items[3].name!r} invoked",
                       before=before, after=after,
                       menu_items=[e.name for e in items])
-    if after != "WDA_NONE":
+    if after != w.DisplayAffinity.NONE.name:
         raise AssertionError(
             f"the window is still excluded from capture ({after}); the recording "
             "would show everything except the application under test")
