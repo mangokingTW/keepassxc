@@ -44,6 +44,17 @@ public:
     {
     }
 
+    // Called once the target window is known, and again when the sequence is
+    // over. Distinct from prepareAutoType()/finishAutoType(), which carry no
+    // window, and from raiseWindow(), which the entry-level path never calls.
+    virtual void beginSequence(WId window)
+    {
+        Q_UNUSED(window);
+    }
+    virtual void endSequence()
+    {
+    }
+
     virtual AutoTypeExecutor& executor() const = 0;
 
 #if defined(Q_OS_MACOS)

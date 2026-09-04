@@ -34,7 +34,8 @@ elseif(APPLE)
             mac/AutoTypeMac.cpp)
 elseif(WIN32)
     list(APPEND autotype_SOURCES
-            windows/AutoTypeWindows.cpp)
+            windows/AutoTypeWindows.cpp
+            windows/UiAccessInjector.cpp)
 endif()
 
 add_library(autotype STATIC ${autotype_SOURCES})
@@ -47,4 +48,8 @@ if(UNIX AND NOT APPLE AND NOT HAIKU)
     endif()
 elseif(APPLE)
     target_link_libraries(autotype "-framework Foundation" "-framework AppKit" "-framework Carbon" "-framework ScreenCaptureKit")
+elseif(WIN32)
+    # shell32 for ShellExecuteEx, which is the only way to start a uiAccess
+    # binary; CreateProcess fails with ERROR_ELEVATION_REQUIRED.
+    target_link_libraries(autotype shell32 advapi32)
 endif()
