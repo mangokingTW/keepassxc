@@ -118,42 +118,41 @@ def uac_enabled() -> bool:
     return value.strip() == "1"
 
 
-def type_at_medium_integrity(hwnd: int, sequence: str, report: Path, timeout: float = 90.0) -> str:
-    """Types `sequence` into `hwnd` from a *non-elevated* process, and reports.
+def type_at_medium_integrity(hwnd: int, sequence: str, report: Path, timeout: float = 120.0) -> str:
+    """Types `sequence` into `hwnd` from a process at the Medium mandatory level.
 
-    Uses a scheduled task registered with RunLevel Limited, which is the
-    reliable way to drop from an elevated session to an ordinary one --
-    CreateProcess cannot lower its own integrity level, and `runas
-    /trustlevel:0x20000` yields a restricted token rather than a plain user one.
+    Two routes, because neither works everywhere:
+
+      * if this process is already unelevated, run the typer directly -- that is
+        an ordinary user session and nothing needs lowering;
+      * otherwise go through run_at_medium_integrity.py, which duplicates this
+        token, sets the copy's integrity level to Medium and launches the child
+        with it.
+
+    The scheduled-task route (`RunLevel Limited`) was tried first and does not
+    de-elevate on a GitHub hosted runner: the account is runneradmin with
+    EnableLUA=1 and FilterAdministratorToken unset, so the session has no
+    filtered token to fall back on and the task ran elevated. Lowering the token
+    directly does not depend on UAC having prepared one.
     """
     if report.exists():
         report.unlink()
 
-    script = Path(__file__).with_name("type_into.py")
-    python = sys.executable
-    task = "CredUiMediumIntegrityTyper"
-    argument = f'"{script}" {hwnd} "{sequence}" "{report}"'
+    typer = Path(__file__).with_name("type_into.py")
+    launcher = Path(__file__).with_name("run_at_medium_integrity.py")
+    argv = [sys.executable, str(typer), str(hwnd), sequence, str(report)]
+    if is_elevated():
+        argv = [sys.executable, str(launcher)] + argv
 
-    powershell(
-        "$ErrorActionPreference='Stop'; "
-        f"$a = New-ScheduledTaskAction -Execute '{python}' -Argument '{argument}'; "
-        "$p = New-ScheduledTaskPrincipal -UserId \"$env:USERDOMAIN\\$env:USERNAME\" "
-        "-LogonType Interactive -RunLevel Limited; "
-        f"Register-ScheduledTask -TaskName {task} -Action $a -Principal $p -Force | Out-Null; "
-        f"Start-ScheduledTask -TaskName {task}"
-    )
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    if done.stdout.strip():
+        print(f"typer launcher stdout: {done.stdout.strip()}")
+    if done.returncode != 0 and done.stderr.strip():
+        print(f"typer launcher stderr: {done.stderr.strip()[:600]}")
 
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if report.exists():
-            text = report.read_text(encoding="utf-8", errors="replace").strip()
-            if "typed=" in text:
-                powershell(f"Unregister-ScheduledTask -TaskName {task} -Confirm:$false "
-                           "-ErrorAction SilentlyContinue")
-                return text
-        time.sleep(0.5)
-    powershell(f"Unregister-ScheduledTask -TaskName {task} -Confirm:$false -ErrorAction SilentlyContinue")
-    return "<the de-elevated typer never reported>"
+    if not report.exists():
+        return f"<no report; launcher exited {done.returncode}>"
+    return report.read_text(encoding="utf-8", errors="replace").strip()
 
 
 class CredentialPrompt:
