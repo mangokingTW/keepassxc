@@ -34,6 +34,7 @@ from credui_harness import (
     broker_pids,
     is_elevated,
     type_at_medium_integrity,
+    uac_enabled,
 )
 from wintegrate.element import UiaElement
 from wintegrate.interop import send_keys
@@ -141,6 +142,17 @@ def medium_integrity_submission():
     root = Path(os.environ.get("RUNNER_TEMP") or os.environ.get("TEMP") or r"C:\Users\Public")
     report_path = root / "credui_typer_report.txt"
 
+    # Checked before raising anything: with UAC off there is no ordinary
+    # integrity level to drop to, so this host cannot produce the case at all.
+    # A GitHub hosted runner is exactly that, and the first version of this
+    # recorded its elevated run as a reproduction.
+    if is_elevated() and not uac_enabled():
+        pytest.skip(
+            "this session is elevated and UAC is disabled (EnableLUA != 1), so no "
+            "ordinary-integrity process can be started here. The reproduction needs a "
+            "host with UAC on; the uiAccess check below still runs."
+        )
+
     with CredentialPrompt() as prompt:
         window = prompt.window
         print(f"test process elevated: {is_elevated()}")
@@ -148,10 +160,14 @@ def medium_integrity_submission():
             window.hwnd, f"{PROBE_USER}\t{PROBE_PASSWORD}\n", report_path
         )
         print(f"de-elevated typer report:\n{report}")
-        assert "elevation=not-elevated" in report, (
-            f"the typer was not running at ordinary integrity, so this would measure the "
-            f"wrong thing; report was: {report!r}"
-        )
+        if "elevation=not-elevated" not in report:
+            # Skip rather than fail: nothing was measured. Failing would be read
+            # as a finding, and an xfail marker on the test would absorb it
+            # entirely -- which is how an elevated run first came back green.
+            pytest.skip(
+                "the typer could not be dropped to ordinary integrity, so the ordinary "
+                f"case was not measured. Report was: {report!r}"
+            )
         assert "typed=yes" in report, f"the typer never delivered its keystrokes: {report!r}"
         yield prompt
 

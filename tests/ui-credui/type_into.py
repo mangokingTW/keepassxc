@@ -57,6 +57,28 @@ def elevation() -> str:
     return "elevated" if elevated.value else "not-elevated"
 
 
+def enable_lua() -> str:
+    """The machine's UAC policy.
+
+    With UAC off there is no filtered token, so an administrator account cannot
+    be dropped to ordinary integrity at all -- and a scheduled task registered
+    with RunLevel Limited still runs elevated. That is the state of a GitHub
+    hosted runner, and without this line the report just says "elevated" with no
+    explanation.
+    """
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "EnableLUA")
+            return str(value)
+    except OSError as exc:
+        return f"unknown ({exc})"
+
+
 def main() -> int:
     if len(sys.argv) < 4:
         print(__doc__)
@@ -65,7 +87,7 @@ def main() -> int:
     sequence = sys.argv[2]
     report = Path(sys.argv[3])
 
-    lines = [f"elevation={elevation()}"]
+    lines = [f"elevation={elevation()}", f"EnableLUA={enable_lua()}"]
 
     for _ in range(6):
         user32.SetForegroundWindow(hwnd)

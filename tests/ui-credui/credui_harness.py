@@ -103,6 +103,19 @@ def is_elevated() -> bool:
     return bool(elevated.value)
 
 
+def uac_enabled() -> bool:
+    """Whether this machine has UAC on.
+
+    Without it there is no filtered token to drop to, so the ordinary-integrity
+    case cannot be produced here at all.
+    """
+    value = powershell(
+        "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion"
+        "\\Policies\\System' -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA"
+    )
+    return value.strip() == "1"
+
+
 def type_at_medium_integrity(hwnd: int, sequence: str, report: Path, timeout: float = 90.0) -> str:
     """Types `sequence` into `hwnd` from a *non-elevated* process, and reports.
 
