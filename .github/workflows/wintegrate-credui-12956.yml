@@ -24,6 +24,11 @@ on:
 permissions:
   contents: read
 
+# Superseded runs are not worth waiting for while the tests are being iterated.
+concurrency:
+  group: credui-verify-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   credui:
     strategy:

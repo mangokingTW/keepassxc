@@ -10,10 +10,15 @@
 # one is green.
 name: Build KeePassXC (Windows)
 
+# Manual only, and cancelling its own earlier runs. Every push to the branch was
+# starting a fresh hour-long build, so three of them ran at once while the tests
+# were still being fixed -- the tests are what the pushes were for.
 on:
   workflow_dispatch:
-  push:
-    branches: [wintegrate-credui-12956]
+
+concurrency:
+  group: keepassxc-windows-build
+  cancel-in-progress: true
 
 permissions:
   contents: read
