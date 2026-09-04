@@ -60,6 +60,12 @@ RESULT = Path(ARGS.result)
 ARTIFACTS = Path(ARGS.artifacts)
 
 PROMPT_CLASS = "Credential Dialog Xaml Host"
+
+SW_HIDE, SW_SHOW, SW_MINIMIZE = 0, 5, 6
+
+# The shell's own windows are left alone: hiding the taskbar or the desktop
+# would outlast this process if anything went wrong afterwards.
+SHELL_CLASSES = frozenset({"Shell_TrayWnd", "Progman", "WorkerW", "Shell_SecondaryTrayWnd"})
 LOCKED_MARKERS = ("\u9501\u5b9a", "locked")
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -187,7 +193,7 @@ class ForegroundTrace:
                     "class": w.get_window_class(hwnd) or "",
                     "title": (w.get_window_title(hwnd) or "")[:40],
                 })
-                user32.ShowWindow(wintypes.HWND(hwnd), 6)  # SW_MINIMIZE
+                user32.ShowWindow(wintypes.HWND(hwnd), SW_HIDE)
             time.sleep(self.interval)
 
     def __exit__(self, *exc):
@@ -207,7 +213,7 @@ class ForegroundTrace:
         return False
 
 
-def clear_background_windows(session, keep: set[int]) -> None:
+def clear_background_windows(session, keep: set[int]) -> list[int]:
     """Minimises every visible top-level window except the ones named.
 
     Not tidiness: KeePassXC hides its own window before typing, and Windows
@@ -221,17 +227,25 @@ def clear_background_windows(session, keep: set[int]) -> None:
     Minimised rather than closed: these windows belong to the machine, not to
     the test, and one of them is the agent that is running the job.
     """
-    minimised = []
+    hidden: list[int] = []
+    described = []
     for snapshot in w.WindowCensus.capture():
         if not snapshot.is_visible or snapshot.hwnd in keep:
             continue
-        if not (snapshot.title or "").strip():
+        if not (snapshot.title or "").strip() or snapshot.class_name in SHELL_CLASSES:
             continue
-        user32.ShowWindow(wintypes.HWND(snapshot.hwnd), 6)  # SW_MINIMIZE
-        minimised.append({"hwnd": hex(snapshot.hwnd), "class": snapshot.class_name,
+        # Hidden, not minimised. Minimising the agent's terminal did not hold:
+        # it was re-activated within 100ms every time, 285 times in one
+        # sequence, and the run turned into a fight over the foreground. A
+        # hidden window is out of the Z-order, so it is neither next after
+        # KeePassXC hides itself nor able to take the foreground back.
+        user32.ShowWindow(wintypes.HWND(snapshot.hwnd), SW_HIDE)
+        hidden.append(snapshot.hwnd)
+        described.append({"hwnd": hex(snapshot.hwnd), "class": snapshot.class_name,
                           "title": (snapshot.title or "")[:40]})
-    session.log_event("background_cleared", f"{len(minimised)} windows minimised",
-                      windows=minimised)
+    session.log_event("background_cleared", f"{len(described)} windows hidden",
+                      windows=described)
+    return hidden
 
 
 def ensure_foreground(session, window, attempts: int = 6) -> None:
@@ -267,7 +281,7 @@ def ensure_foreground(session, window, attempts: int = 6) -> None:
                 "under test; it holds the foreground and input to the main window "
                 "will be swallowed. Seed the setting that suppresses it."
             )
-        user32.ShowWindow(wintypes.HWND(foreground), 6)  # SW_MINIMIZE
+        user32.ShowWindow(wintypes.HWND(foreground), SW_MINIMIZE)
         time.sleep(0.4)
     raise AssertionError(
         f"could not put {window.title!r} in front after {attempts} attempts; "
@@ -494,7 +508,7 @@ def run(session) -> int:
         # Everything else out of the way first, so that hiding KeePassXC leaves
         # the prompt as the next window in the Z-order rather than whatever the
         # machine happens to have open.
-        clear_background_windows(session, keep={window.hwnd, prompt.hwnd})
+        hidden = clear_background_windows(session, keep={window.hwnd, prompt.hwnd})
         ensure_foreground(session, prompt)
         ensure_foreground(session, window)
         log_window(session, "foreground_before_hotkey", w.get_foreground_window())
@@ -541,6 +555,9 @@ def run(session) -> int:
         session.log_event("credui_outcome", outcome.replace("\n", " | ") or "never submitted",
                           submitted=submitted)
 
+    for hwnd in hidden:
+        user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOW)
+    session.log_event("background_restored", f"{len(hidden)} windows shown again")
     if host.poll() is None:
         host.terminate()
     print(f"VERDICT = {'fix works' if submitted else 'auto-type did not reach the prompt'}",
