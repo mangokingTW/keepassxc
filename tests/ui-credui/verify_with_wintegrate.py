@@ -66,6 +66,10 @@ SW_HIDE, SW_SHOW, SW_MINIMIZE = 0, 5, 6
 # The shell's own windows are left alone: hiding the taskbar or the desktop
 # would outlast this process if anything went wrong afterwards.
 SHELL_CLASSES = frozenset({"Shell_TrayWnd", "Progman", "WorkerW", "Shell_SecondaryTrayWnd"})
+
+# Windows whose owner puts them back in the foreground no matter how often they
+# are asked not to. On a GitHub hosted runner this is the agent's own terminal.
+PERSISTENT_FOREGROUND_CLASSES = frozenset({"CASCADIA_HOSTING_WINDOW_CLASS"})
 LOCKED_MARKERS = ("\u9501\u5b9a", "locked")
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -166,6 +170,7 @@ class ForegroundTrace:
         # instead -- so a window that surfaces mid-sequence eats the rest of it.
         self.hold = hold
         self.interventions: list[dict] = []
+        self.hidden: set[int] = set()
         self.samples: list[tuple[float, int, str, str]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -207,12 +212,28 @@ class ForegroundTrace:
                     w.Window(self.hold).set_foreground()
                 except Exception as exc:  # noqa: BLE001 - a diagnostic thread
                     self.interventions[-1]["set_foreground_failed"] = f"{type(exc).__name__}"
+
+                # One window on a hosted runner does not give the foreground
+                # back: measured, the agent's terminal took it at t=4.55 and
+                # sixteen set_foreground calls over the next twenty seconds
+                # never won it back, while minimising it only had its owner
+                # re-activate it. It is hidden for the rest of the sequence and
+                # shown again afterwards -- targeted at that one class rather
+                # than at the desktop, because everything else here is either
+                # the target or harmless.
+                if w.get_window_class(hwnd) in PERSISTENT_FOREGROUND_CLASSES:
+                    user32.ShowWindow(wintypes.HWND(hwnd), SW_HIDE)
+                    self.hidden.add(hwnd)
+                    self.interventions[-1]["hidden"] = True
             time.sleep(self.interval)
 
     def __exit__(self, *exc):
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
+        # Put back whatever was hidden: those windows belong to the machine.
+        for hwnd in self.hidden:
+            user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOW)
         # Only the changes, because a list of identical samples says nothing:
         # what matters is the order the foreground moved in.
         self.session.log_event(
