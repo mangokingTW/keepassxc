@@ -40,12 +40,40 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           pip install aqtinstall
-          aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 `
-            -m qtsvg qtnetworkauth -O C:\Qt
+          $arch = 'win64_msvc2022_64'
+
+          # Printed, not assumed: `-m qtsvg` failed with "The packages ['qtsvg']
+          # were not found while parsing XML of package information", and
+          # guessing module names again would just move the guess.
+          Write-Host "--- modules available for $env:QT_VERSION $arch"
+          aqt list-qt windows desktop --modules $env:QT_VERSION $arch
+
+          aqt install-qt windows desktop $env:QT_VERSION $arch -O C:\Qt
+          if ($LASTEXITCODE -ne 0) { throw "aqt install-qt failed with $LASTEXITCODE" }
           $prefix = "C:\Qt\$env:QT_VERSION\msvc2022_64"
           if (-not (Test-Path $prefix)) { throw "Qt did not land at $prefix" }
+
+          # KeePassXC needs Core Network Concurrent Gui Svg Widgets Test
+          # LinguistTools. Whether Svg ships in the base package or as a module
+          # is decided by looking for its CMake config rather than by belief.
+          $svg = Get-ChildItem $prefix -Recurse -Filter 'Qt6SvgConfig.cmake' -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $svg) {
+            Write-Host "Svg not in the base package; installing the module"
+            aqt install-qt windows desktop $env:QT_VERSION $arch -m qtsvg -O C:\Qt
+            $svg = Get-ChildItem $prefix -Recurse -Filter 'Qt6SvgConfig.cmake' -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+          }
+          if (-not $svg) {
+            throw "no Qt6SvgConfig.cmake under $prefix; see the module list printed above"
+          }
+          Write-Host "Svg config: $($svg.FullName)"
+
+          foreach ($component in 'Core','Network','Concurrent','Gui','Svg','Widgets','Test') {
+            $found = Test-Path (Join-Path $prefix "lib\cmake\Qt6$component")
+            Write-Host "  Qt6$component present: $found"
+          }
           "QT_PREFIX=$prefix" >> $env:GITHUB_ENV
-          Write-Host "Qt at $prefix"
 
       # The runner ships vcpkg; the repo is in manifest mode, so configure
       # installs what vcpkg.json asks for.
