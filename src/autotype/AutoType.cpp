@@ -344,11 +344,6 @@ void AutoType::executeAutoTypeActions(const Entry* entry,
         window = m_platform->activeWindow();
     }
 
-    // The first point at which the target is known on *both* paths: the
-    // entry-level one arrives here with window == 0 and resolves it above, so
-    // it never called raiseWindow().
-    m_platform->beginSequence(window);
-
     for (const auto& action : asConst(actions)) {
         // Cancel Auto-Type if the active window changed
         if (m_platform->activeWindow() != window) {
@@ -384,11 +379,6 @@ void AutoType::executeAutoTypeActions(const Entry* entry,
             break;
         }
     }
-
-    // Paired with beginSequence() above, and reached by every exit from the
-    // loop: whatever a platform arranged for the target must not outlive the
-    // sequence.
-    m_platform->endSequence();
 
     m_inAutoType.unlock();
     emit autotypeFinished();

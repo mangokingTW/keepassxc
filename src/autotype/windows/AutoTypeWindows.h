@@ -27,10 +27,7 @@
 #include "autotype/AutoTypeAction.h"
 #include "autotype/AutoTypePlatform.h"
 
-#include <QScopedPointer>
-
 class WinUtils;
-class UiAccessInjector;
 
 class AutoTypePlatformWin : public QObject, public AutoTypePlatformInterface
 {
@@ -38,22 +35,11 @@ class AutoTypePlatformWin : public QObject, public AutoTypePlatformInterface
 
 public:
     explicit AutoTypePlatformWin();
-    // Declared here and defined in the .cpp on purpose: QScopedPointer needs the
-    // complete type where the destructor is instantiated, and an implicit one in
-    // this header only has the forward declaration --
-    //   error C2027: use of undefined type 'UiAccessInjector'
-    ~AutoTypePlatformWin() override;
     bool isAvailable() override;
     QStringList windowTitles() override;
     WId activeWindow() override;
     QString activeWindowTitle() override;
     bool raiseWindow(WId window) override;
-    // The sequence hooks, not raiseWindow, are where delegation is decided:
-    // entry-level Auto-Type never calls raiseWindow (it passes no window and
-    // resolves the target afterwards), so the decision has to sit on a hook
-    // that both paths reach.
-    void beginSequence(WId window) override;
-    void endSequence() override;
     AutoTypeExecutor& executor() const override;
 
     void sendCharVirtual(const QChar& ch);
@@ -62,16 +48,6 @@ public:
 
 private:
     AutoTypeExecutor* m_executor = nullptr;
-    // Delegation for windows an ordinary process cannot reach. See
-    // UiAccessInjector for what those are and why this is a separate process;
-    // with no helper installed it stays inactive and nothing changes.
-    QScopedPointer<UiAccessInjector> m_injector;
-
-    // The single exit for injected input. All three senders above go through
-    // it, so delegation is in effect for a whole sequence or not at all --
-    // three direct SendInput calls were one edit away from typing half a
-    // password into the void.
-    bool sendInputs(INPUT* inputs, int count);
 
     static bool isExtendedKey(DWORD nativeKeyCode);
     static bool isAltTabWindow(HWND hwnd);

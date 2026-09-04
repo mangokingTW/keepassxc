@@ -17,7 +17,6 @@
  */
 
 #include "AutoTypeWindows.h"
-#include "UiAccessInjector.h"
 #include "core/Tools.h"
 #include "gui/osutils/OSUtils.h"
 #include "gui/osutils/winutils/WinUtils.h"
@@ -34,12 +33,8 @@
 //
 AutoTypePlatformWin::AutoTypePlatformWin()
     : m_executor(new AutoTypeExecutorWin(this))
-    , m_injector(new UiAccessInjector)
 {
 }
-
-// Out of line so that QScopedPointer sees the complete UiAccessInjector.
-AutoTypePlatformWin::~AutoTypePlatformWin() = default;
 
 //
 // Test if os version is Windows 7 or later
@@ -93,56 +88,6 @@ bool AutoTypePlatformWin::raiseWindow(WId window)
 }
 
 //
-// Delegation for the sequence about to be typed
-//
-// Decided here rather than in raiseWindow(), which is only called when the
-// caller already knows the target: entry-level Auto-Type passes no window and
-// resolves it afterwards, so the first version of this never ran on that path
-// at all -- measured as no warning and no helper process, with the keystrokes
-// going into a credential prompt that dropped them.
-//
-// With no helper installed -- portable builds, self-built binaries -- begin()
-// returns false, everything keeps using ::SendInput, and the only difference is
-// that the credential prompt still does not receive it.
-//
-void AutoTypePlatformWin::beginSequence(WId window)
-{
-    if (!m_injector) {
-        return;
-    }
-    HWND hwnd = reinterpret_cast<HWND>(window);
-    m_injector->end();
-    if (UiAccessInjector::isBrokeredCredentialDialog(hwnd)) {
-        if (!m_injector->begin(hwnd)) {
-            qWarning("Auto-Type: this window only accepts input from a privileged process, "
-                     "and no uiAccess helper is available");
-        }
-    }
-}
-
-void AutoTypePlatformWin::endSequence()
-{
-    if (m_injector) {
-        m_injector->end();
-    }
-}
-
-//
-// Single exit for injected input
-//
-// The three senders below called ::SendInput directly. They go through here so
-// that delegation applies to a whole sequence or not at all: with three call
-// sites it was one edit away from typing half a password into the void.
-//
-bool AutoTypePlatformWin::sendInputs(INPUT* inputs, int count)
-{
-    if (m_injector && m_injector->active() && m_injector->send(inputs, count)) {
-        return true;
-    }
-    return ::SendInput(count, inputs, sizeof(INPUT)) == static_cast<UINT>(count);
-}
-
-//
 // Send unicode character to foreground window
 //
 void AutoTypePlatformWin::sendChar(const QChar& ch)
@@ -158,7 +103,7 @@ void AutoTypePlatformWin::sendChar(const QChar& ch)
     in[1] = in[0];
     in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
 
-    sendInputs(&in[0], 2);
+    ::SendInput(2, &in[0], sizeof(INPUT));
 }
 
 void AutoTypePlatformWin::sendCharVirtual(const QChar& ch)
@@ -195,7 +140,7 @@ void AutoTypePlatformWin::sendCharVirtual(const QChar& ch)
     in[1] = in[0];
     in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
 
-    sendInputs(&in[0], 2);
+    ::SendInput(2, &in[0], sizeof(INPUT));
 
     if (HIBYTE(vKey) & 0x6) {
         setKeyState(Qt::Key_AltGr, false);
@@ -234,7 +179,7 @@ void AutoTypePlatformWin::setKeyState(Qt::Key key, bool down)
     in.ki.time = 0;
     in.ki.dwExtraInfo = ::GetMessageExtraInfo();
 
-    sendInputs(&in, 1);
+    ::SendInput(1, &in, sizeof(INPUT));
 }
 
 //

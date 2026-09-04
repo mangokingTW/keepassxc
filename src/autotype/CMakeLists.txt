@@ -34,8 +34,7 @@ elseif(APPLE)
             mac/AutoTypeMac.cpp)
 elseif(WIN32)
     list(APPEND autotype_SOURCES
-            windows/AutoTypeWindows.cpp
-            windows/UiAccessInjector.cpp)
+            windows/AutoTypeWindows.cpp)
 endif()
 
 add_library(autotype STATIC ${autotype_SOURCES})
@@ -48,9 +47,4 @@ if(UNIX AND NOT APPLE AND NOT HAIKU)
     endif()
 elseif(APPLE)
     target_link_libraries(autotype "-framework Foundation" "-framework AppKit" "-framework Carbon" "-framework ScreenCaptureKit")
-elseif(WIN32)
-    # shell32 for ShellExecuteEx: a uiAccess helper cannot be started with
-    # CreateProcess -- that fails with ERROR_ELEVATION_REQUIRED, because the
-    # grant comes from the AppInfo service and only the shell path consults it.
-    target_link_libraries(autotype shell32)
 endif()
