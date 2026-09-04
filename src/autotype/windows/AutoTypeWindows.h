@@ -48,6 +48,12 @@ public:
     WId activeWindow() override;
     QString activeWindowTitle() override;
     bool raiseWindow(WId window) override;
+    // The sequence hooks, not raiseWindow, are where delegation is decided:
+    // entry-level Auto-Type never calls raiseWindow (it passes no window and
+    // resolves the target afterwards), so the decision has to sit on a hook
+    // that both paths reach.
+    void beginSequence(WId window) override;
+    void endSequence() override;
     AutoTypeExecutor& executor() const override;
 
     void sendCharVirtual(const QChar& ch);

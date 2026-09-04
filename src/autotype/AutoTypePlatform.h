@@ -44,6 +44,21 @@ public:
     {
     }
 
+    // Called once the target window is known, and again when the sequence is
+    // over. Distinct from prepareAutoType()/finishAutoType(), which carry no
+    // window and only run on the global path: a platform that has to arrange
+    // something *for the target* -- see the Windows implementation, which some
+    // windows will not accept synthetic input from at all -- has no other point
+    // to do it. raiseWindow() is not that point, because the entry-level path
+    // passes no window and therefore never calls it.
+    virtual void beginSequence(WId window)
+    {
+        Q_UNUSED(window);
+    }
+    virtual void endSequence()
+    {
+    }
+
     virtual AutoTypeExecutor& executor() const = 0;
 
 #if defined(Q_OS_MACOS)

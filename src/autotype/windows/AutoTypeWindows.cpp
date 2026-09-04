@@ -89,24 +89,42 @@ bool AutoTypePlatformWin::raiseWindow(WId window)
 {
     HWND hwnd = reinterpret_cast<HWND>(window);
 
-    const bool raised = ::BringWindowToTop(hwnd) && ::SetForegroundWindow(hwnd);
+    return ::BringWindowToTop(hwnd) && ::SetForegroundWindow(hwnd);
+}
 
-    // Decided once per sequence, here, because this is the last point at which
-    // the target window is known before any keystroke is sent. With no helper
-    // installed -- portable builds, self-built binaries -- begin() returns
-    // false, everything keeps using ::SendInput, and the only difference is
-    // that the credential prompt still does not receive it.
-    if (m_injector) {
-        m_injector->end();
-        if (raised && UiAccessInjector::isBrokeredCredentialDialog(hwnd)) {
-            if (!m_injector->begin(hwnd)) {
-                qWarning("Auto-Type: this window only accepts input from a privileged process, "
-                         "and no uiAccess helper is available");
-            }
+//
+// Delegation for the sequence about to be typed
+//
+// Decided here rather than in raiseWindow(), which is only called when the
+// caller already knows the target: entry-level Auto-Type passes no window and
+// resolves it afterwards, so the first version of this never ran on that path
+// at all -- measured as no warning and no helper process, with the keystrokes
+// going into a credential prompt that dropped them.
+//
+// With no helper installed -- portable builds, self-built binaries -- begin()
+// returns false, everything keeps using ::SendInput, and the only difference is
+// that the credential prompt still does not receive it.
+//
+void AutoTypePlatformWin::beginSequence(WId window)
+{
+    if (!m_injector) {
+        return;
+    }
+    HWND hwnd = reinterpret_cast<HWND>(window);
+    m_injector->end();
+    if (UiAccessInjector::isBrokeredCredentialDialog(hwnd)) {
+        if (!m_injector->begin(hwnd)) {
+            qWarning("Auto-Type: this window only accepts input from a privileged process, "
+                     "and no uiAccess helper is available");
         }
     }
+}
 
-    return raised;
+void AutoTypePlatformWin::endSequence()
+{
+    if (m_injector) {
+        m_injector->end();
+    }
 }
 
 //

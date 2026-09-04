@@ -45,6 +45,7 @@ DATABASE_PASSWORD = (
     "" if os.environ.get("KPXC_TEST_DB_EMPTY") else os.environ.get("KPXC_TEST_DB_PASSWORD", "probe-db-pass")
 )
 ENTRY_USERNAME = os.environ.get("KPXC_TEST_USERNAME", "probeuser")
+ENTRY_TITLE = os.environ.get("KPXC_TEST_ENTRY_TITLE", "Windows")
 
 DIALOG_CLASS = "Credential Dialog Xaml Host"
 
@@ -234,9 +235,11 @@ def main() -> int:
             return 1
         window = refreshed
 
-    # The prompt is raised second, so it is the window auto-type will target:
-    # KeePassXC types into whatever was active before it.
-    host = subprocess.Popen([sys.executable, str(HOST_SCRIPT)])
+    # CREATE_NO_WINDOW: the host's console window is otherwise a candidate for
+    # "the last active window", and auto-type happily typed the password into
+    # it instead of into the prompt it was hosting.
+    host = subprocess.Popen([sys.executable, str(HOST_SCRIPT)],
+                            creationflags=0x08000000)
     deadline = time.monotonic() + 30
     dialog = None
     while time.monotonic() < deadline:
@@ -251,21 +254,49 @@ def main() -> int:
 
     user32.SetForegroundWindow(dialog.hwnd)
     time.sleep(1.0)
+
+    # TreeItem, not ListItem: KeePassXC's entry view is a QTreeView, and Qt maps
+    # its rows to UIA TreeItem (50024). Asking for ListItem (50007) found
+    # nothing at all -- the window has not one such element -- so the run
+    # reported "no entry rows" with a populated database on screen.
+    root = UiaElement.from_handle(window.hwnd)
+    rows = [e for e in root.find_all(control_type_id=50024) if e.name]
+    say("entries", [ascii(r.name) for r in rows][:8])
+    # The group tree is TreeItems too, so pick by the entry's title rather than
+    # by position: rows[0] was the "Passwords" group, which auto-types nothing.
+    target = next((r for r in rows if (r.name or "").strip() == ENTRY_TITLE), None)
+    say("entry_selected", None if target is None else ascii(target.name))
+    if target is None:
+        say("VERDICT", f"inconclusive -- no entry row titled {ENTRY_TITLE!r}")
+        return 1
+    # Selected through UIA rather than by clicking, because clicking would make
+    # KeePassXC the active window -- and auto-type targets whatever was active
+    # last. An earlier run raised KeePassXC here, and the password went into the
+    # credential host's console window, which was the last other window active:
+    # the screenshots showed a black console on top and no prompt at all.
+    try:
+        target.select_verified()
+    except Exception:
+        target.click()
+    time.sleep(1.0)
+
+    # The prompt must be the *previously* active window, and KeePassXC the
+    # active one, when the hotkey fires. Firing it with the prompt still active
+    # cannot work from here: the hotkey is itself injected input at medium
+    # integrity, so UIPI drops it before KeePassXC ever sees it -- measured, the
+    # run reached "is_the_prompt=True" and then no auto-type happened at all.
+    user32.SetForegroundWindow(dialog.hwnd)
+    time.sleep(1.0)
+    say("prompt_activated", user32.GetForegroundWindow() == dialog.hwnd)
     user32.ShowWindow(window.hwnd, 9)  # SW_RESTORE
     user32.SetForegroundWindow(window.hwnd)
     time.sleep(1.5)
-
-    root = UiaElement.from_handle(window.hwnd)
-    rows = [e for e in root.find_all(control_type_id=50007) if e.name]
-    say("entries", [ascii(r.name) for r in rows][:6])
-    if not rows:
-        say("VERDICT", "inconclusive -- no entry rows in the database view")
+    foreground = user32.GetForegroundWindow()
+    say("foreground_before_hotkey",
+        "%s is_keepassxc=%s" % (hex(foreground), foreground == window.hwnd))
+    if foreground != window.hwnd:
+        say("VERDICT", "inconclusive -- KeePassXC was not active when auto-type fired")
         return 1
-    try:
-        rows[0].select_verified()
-    except Exception:
-        rows[0].click()
-    time.sleep(1.0)
 
     # Ctrl+Shift+V is "Perform Auto-Type" for the selected entry. KeePassXC is
     # at the same integrity level as this process, so triggering it needs no
@@ -281,6 +312,10 @@ def main() -> int:
                         if any(k in name for k in ("\u662f", "Yes", "OK"))), None)
         if confirm is not None:
             say("confirmation", [ascii(n) for n in buttons if n])
+            # The prompt names the window it is about to type into, which is the
+            # only direct read on what KeePassXC picked as the target.
+            texts = [ascii(t.name) for t in dialog_root.find_all(control_type_id=50020) if t.name]
+            say("confirmation_text", texts[:4])
             confirm.invoke()
             break
 
