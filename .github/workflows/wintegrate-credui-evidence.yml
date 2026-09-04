@@ -169,22 +169,37 @@ jobs:
           # Asked here rather than discovered in the verification as an exit code
           # nobody can read: a console binary that cannot load a DLL exits with
           # 0xC0000135 and prints nothing at all.
-          # Both binaries: the GUI imports the same third-party runtime as the
-          # CLI, and only the CLI was ever started here -- so a bundle whose
-          # GUI could not load would have reached the verification job and
-          # failed there as "no window appeared".
-          foreach ($binary in @($cli, $exe.FullName)) {
-            & $binary --version
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "$binary --version exited $LASTEXITCODE (0x$('{0:X8}' -f $LASTEXITCODE))"
-              Get-ChildItem $exe.DirectoryName | Select-Object Name, Length |
-                Format-Table -AutoSize | Out-String | Write-Host
-              $dumpbin = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio" -Recurse `
-                -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($dumpbin) { & $dumpbin.FullName /dependents $binary | Write-Host }
-              throw "$binary cannot start, so this bundle is not verifiable"
-            }
+          function Show-WhyItCannotStart($binary, $code) {
+            Write-Host "$binary exited $code (0x$('{0:X8}' -f $code))"
+            Get-ChildItem $exe.DirectoryName | Select-Object Name, Length |
+              Format-Table -AutoSize | Out-String | Write-Host
+            $dumpbin = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio" -Recurse `
+              -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($dumpbin) { & $dumpbin.FullName /dependents $binary | Write-Host }
           }
+
+          # The console binary can be asked directly.
+          & $cli --version
+          if ($LASTEXITCODE -ne 0) {
+            Show-WhyItCannotStart $cli $LASTEXITCODE
+            throw "keepassxc-cli cannot start, so this bundle is not verifiable"
+          }
+
+          # The GUI is checked by staying alive, not by answering --version. It
+          # is a GUI-subsystem process: asked for its version on a runner it
+          # entered its message loop instead of printing and exiting, and the
+          # step sat there until it was cancelled. A loader failure is
+          # immediate, so surviving a few seconds is the positive evidence --
+          # and it is then killed rather than left to hold the single-instance
+          # slot the verification job needs.
+          $gui = Start-Process -FilePath $exe.FullName -PassThru
+          Start-Sleep -Seconds 5
+          if ($gui.HasExited) {
+            Show-WhyItCannotStart $exe.FullName $gui.ExitCode
+            throw "KeePassXC exited immediately, so this bundle is not verifiable"
+          }
+          Write-Host "KeePassXC stayed alive for 5s: the loader is satisfied"
+          Stop-Process -Id $gui.Id -Force
 
           "STAGE_DIR=$($exe.DirectoryName)" >> $env:GITHUB_ENV
 
