@@ -40,17 +40,18 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
-          # Copied from .github/workflows/copilot-setup-steps.yml, which is this
-          # project's own list for an ubuntu runner (Qt5 and Botan 2; the noble
-          # archive has no libbotan-3-dev, which is what a hand-written list got
-          # wrong first). xvfb is the only addition.
+          # Qt6 and Botan 2: develop's find_package(Qt6 ... REQUIRED) rules out
+          # the Qt5 list in copilot-setup-steps.yml, and noble carries botan
+          # 2.19.3, which clears the project's 2.19.1 minimum -- libbotan-3-dev
+          # does not exist there. Both were found by trying, one per run.
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake g++ ninja-build qtbase5-dev qtbase5-private-dev \
-            qttools5-dev qttools5-dev-tools libqt5svg5-dev libargon2-dev \
-            libkeyutils-dev libminizip-dev libbotan-2-dev libqrencode-dev \
-            zlib1g-dev libreadline-dev libpcsclite-dev libusb-1.0-0-dev \
-            libxi-dev libxtst-dev libqt5x11extras5-dev xvfb
+            build-essential cmake g++ ninja-build \
+            qt6-base-dev qt6-base-private-dev qt6-svg-dev libqt6svg6-dev \
+            qt6-tools-dev qt6-tools-dev-tools qt6-l10n-tools \
+            libargon2-dev libkeyutils-dev libminizip-dev libbotan-2-dev \
+            libqrencode-dev zlib1g-dev libreadline-dev libpcsclite-dev \
+            libusb-1.0-0-dev libxi-dev libxtst-dev xvfb
 
       - name: Configure and build the tests
         run: |
