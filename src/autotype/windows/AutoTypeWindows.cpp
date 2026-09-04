@@ -17,6 +17,7 @@
  */
 
 #include "AutoTypeWindows.h"
+#include "UiAccessInjector.h"
 #include "core/Tools.h"
 #include "gui/osutils/OSUtils.h"
 #include "gui/osutils/winutils/WinUtils.h"
@@ -33,6 +34,7 @@
 //
 AutoTypePlatformWin::AutoTypePlatformWin()
     : m_executor(new AutoTypeExecutorWin(this))
+    , m_injector(new UiAccessInjector)
 {
 }
 
@@ -84,7 +86,39 @@ bool AutoTypePlatformWin::raiseWindow(WId window)
 {
     HWND hwnd = reinterpret_cast<HWND>(window);
 
-    return ::BringWindowToTop(hwnd) && ::SetForegroundWindow(hwnd);
+    const bool raised = ::BringWindowToTop(hwnd) && ::SetForegroundWindow(hwnd);
+
+    // Decided once per sequence, here, because this is the last point at which
+    // the target window is known before any keystroke is sent. With no helper
+    // installed -- portable builds, self-built binaries -- begin() returns
+    // false, everything keeps using ::SendInput, and the only difference is
+    // that the credential prompt still does not receive it.
+    if (m_injector) {
+        m_injector->end();
+        if (raised && UiAccessInjector::isBrokeredCredentialDialog(hwnd)) {
+            if (!m_injector->begin(hwnd)) {
+                qWarning("Auto-Type: this window only accepts input from a privileged process, "
+                         "and no uiAccess helper is available");
+            }
+        }
+    }
+
+    return raised;
+}
+
+//
+// Single exit for injected input
+//
+// The three senders below called ::SendInput directly. They go through here so
+// that delegation applies to a whole sequence or not at all: with three call
+// sites it was one edit away from typing half a password into the void.
+//
+bool AutoTypePlatformWin::sendInputs(INPUT* inputs, int count)
+{
+    if (m_injector && m_injector->active() && m_injector->send(inputs, count)) {
+        return true;
+    }
+    return ::SendInput(count, inputs, sizeof(INPUT)) == static_cast<UINT>(count);
 }
 
 //
@@ -103,7 +137,7 @@ void AutoTypePlatformWin::sendChar(const QChar& ch)
     in[1] = in[0];
     in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
 
-    ::SendInput(2, &in[0], sizeof(INPUT));
+    sendInputs(&in[0], 2);
 }
 
 void AutoTypePlatformWin::sendCharVirtual(const QChar& ch)
@@ -140,7 +174,7 @@ void AutoTypePlatformWin::sendCharVirtual(const QChar& ch)
     in[1] = in[0];
     in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
 
-    ::SendInput(2, &in[0], sizeof(INPUT));
+    sendInputs(&in[0], 2);
 
     if (HIBYTE(vKey) & 0x6) {
         setKeyState(Qt::Key_AltGr, false);
@@ -179,7 +213,7 @@ void AutoTypePlatformWin::setKeyState(Qt::Key key, bool down)
     in.ki.time = 0;
     in.ki.dwExtraInfo = ::GetMessageExtraInfo();
 
-    ::SendInput(1, &in, sizeof(INPUT));
+    sendInputs(&in, 1);
 }
 
 //

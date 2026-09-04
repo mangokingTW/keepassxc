@@ -26,7 +26,16 @@
  * Since ShellExecute gives no pipes, the report is written to the file named by
  * %UIACCESS_HELPER_LOG% as well as to stdout.
  *
- * Usage: typehelper.exe <text> [delay_ms] [log_path] [target_hwnd]
+ * Two modes:
+ *
+ *   typehelper.exe --pipe <name> --target <hwnd> [--log <path>]
+ *       Connects to a named pipe the caller created, and injects the INPUT
+ *       records it receives. Used by KeePassXC: auto-type is per-keystroke, so a
+ *       process per character is not an option. It exits when the caller closes
+ *       the pipe, so no privileged process outlives the sequence.
+ *
+ *   typehelper.exe <text> [delay_ms] [log_path] [target_hwnd]
+ *       Types <text> once. This is what the reproduction tests drive.
  *   Types <text> one character at a time with KEYEVENTF_UNICODE -- the same call
  *   KeePassXC's AutoTypeWindows.cpp makes, so a difference in outcome is a
  *   difference in privilege, not in API. Tab and Enter in <text> are sent as
@@ -103,6 +112,80 @@ static int press_vk(WORD vk)
     return 1;
 }
 
+/* Nothing is injected into a window other than the one named at startup: the
+ * helper is a UIPI bypass, so its scope has to be fixed before any caller can
+ * ask for something. */
+static HWND g_target = NULL;
+
+
+static int pipe_mode(const wchar_t *name)
+{
+    wchar_t full[MAX_PATH];
+    _snwprintf(full, MAX_PATH, L"\\\\.\\pipe\\%ls", name);
+
+    HANDLE pipe = CreateFileW(full, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (pipe == INVALID_HANDLE_VALUE) {
+        report("pipe open failed: %lu\n", GetLastError());
+        return 4;
+    }
+    report("pipe connected: %ls\n", full);
+
+    /* Records arrive as raw INPUT structures. The count is bounded so a
+     * corrupt or hostile length cannot be turned into a huge allocation. */
+    for (;;) {
+        DWORD count = 0, got = 0;
+        if (!ReadFile(pipe, &count, sizeof(count), &got, NULL) || got != sizeof(count)) {
+            report("pipe closed by the caller\n");
+            break;
+        }
+        if (count == 0 || count > 64) {
+            report("refusing a batch of %lu records\n", count);
+            break;
+        }
+        INPUT batch[64];
+        DWORD wanted = count * (DWORD)sizeof(INPUT);
+        DWORD read_total = 0;
+        while (read_total < wanted) {
+            if (!ReadFile(pipe, ((char *)batch) + read_total, wanted - read_total, &got, NULL) || got == 0) {
+                report("short read: %lu of %lu\n", read_total, wanted);
+                CloseHandle(pipe);
+                return 5;
+            }
+            read_total += got;
+        }
+
+        if (g_target && GetForegroundWindow() != g_target) {
+            /* Refusing is the safe answer: the keystrokes were meant for one
+             * window and something else now has the focus. */
+            report("foreground is not the target; dropping %lu records\n", count);
+            continue;
+        }
+
+        UINT sent = SendInput(count, batch, sizeof(INPUT));
+        if (sent != count) {
+            report("SendInput queued %u/%lu, GetLastError=%lu\n", sent, count, GetLastError());
+        }
+    }
+
+    CloseHandle(pipe);
+    return 0;
+}
+
+static DWORD ui_access_flag(void)
+{
+    HANDLE token = NULL;
+    DWORD ui_access = 0, size = 0;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        /* TokenUIAccess == 26 */
+        if (!GetTokenInformation(token, (TOKEN_INFORMATION_CLASS)26, &ui_access,
+                                 sizeof(ui_access), &size)) {
+            report("GetTokenInformation(TokenUIAccess) failed: %lu\n", GetLastError());
+        }
+        CloseHandle(token);
+    }
+    return ui_access;
+}
+
 int wmain(int argc, wchar_t **argv)
 {
     if (argc < 2) {
@@ -117,23 +200,36 @@ int wmain(int argc, wchar_t **argv)
     const wchar_t *log_path = (argc > 3) ? argv[3] : L"C:\\Users\\Public\\uiaccess_helper.log";
     g_log = _wfopen(log_path, L"w");
 
+    /* --pipe selects the mode KeePassXC uses. */
+    if (argc >= 3 && wcscmp(argv[1], L"--pipe") == 0) {
+        const wchar_t *name = argv[2];
+        const wchar_t *log_path = L"";
+        for (int i = 3; i + 1 < argc; i += 2) {
+            if (wcscmp(argv[i], L"--target") == 0) {
+                g_target = (HWND)(uintptr_t)_wtoi64(argv[i + 1]);
+            } else if (wcscmp(argv[i], L"--log") == 0) {
+                log_path = argv[i + 1];
+            }
+        }
+        if (*log_path) {
+            g_log = _wfopen(log_path, L"w");
+        }
+        report("uiAccess=%lu\n", ui_access_flag());
+        report("target=%p\n", (void *)g_target);
+        int rc = pipe_mode(name);
+        if (g_log) {
+            fclose(g_log);
+        }
+        return rc;
+    }
+
     DWORD delay = (argc > 2) ? (DWORD)_wtoi(argv[2]) : 4000;
 
     /* Reported rather than asserted: a process only has uiAccess if the OS
      * granted it, and it is granted silently or not at all. Printing the token
      * flag is how a run that quietly lost the exemption stays distinguishable
      * from one where the dialog simply refused the input. */
-    HANDLE token = NULL;
-    DWORD ui_access = 0, size = 0;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
-        /* TokenUIAccess == 26 */
-        if (!GetTokenInformation(token, (TOKEN_INFORMATION_CLASS)26, &ui_access,
-                                 sizeof(ui_access), &size)) {
-            report("GetTokenInformation(TokenUIAccess) failed: %lu\n", GetLastError());
-        }
-        CloseHandle(token);
-    }
-    report("uiAccess=%lu\n", ui_access);
+    report("uiAccess=%lu\n", ui_access_flag());
     report("waiting %lu ms, then typing %d characters\n", delay, (int)wcslen(argv[1]));
 
     HWND requested = NULL;

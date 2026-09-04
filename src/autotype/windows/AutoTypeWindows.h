@@ -27,7 +27,10 @@
 #include "autotype/AutoTypeAction.h"
 #include "autotype/AutoTypePlatform.h"
 
+#include <QScopedPointer>
+
 class WinUtils;
+class UiAccessInjector;
 
 class AutoTypePlatformWin : public QObject, public AutoTypePlatformInterface
 {
@@ -48,6 +51,16 @@ public:
 
 private:
     AutoTypeExecutor* m_executor = nullptr;
+    // Delegation for windows an ordinary process cannot reach. See
+    // UiAccessInjector for what those are and why this is a separate process;
+    // with no helper installed it stays inactive and nothing changes.
+    QScopedPointer<UiAccessInjector> m_injector;
+
+    // The single exit for injected input. All three senders above go through
+    // it, so delegation is in effect for a whole sequence or not at all --
+    // three direct SendInput calls were one edit away from typing half a
+    // password into the void.
+    bool sendInputs(INPUT* inputs, int count);
 
     static bool isExtendedKey(DWORD nativeKeyCode);
     static bool isAltTabWindow(HWND hwnd);
