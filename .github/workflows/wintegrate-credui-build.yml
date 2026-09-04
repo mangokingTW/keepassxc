@@ -40,7 +40,18 @@ jobs:
 
       # aqtinstall rather than a third-party action: one less thing to trust in
       # a repository that is not mine, and the version is pinned here.
+      # Both caches exist because a cold run costs about an hour -- Qt a couple
+      # of minutes, vcpkg's botan the rest -- and the point of this workflow is
+      # to iterate on a patch.
+      - name: Cache Qt
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Qt
+          key: qt-${{ env.QT_VERSION }}-win64_msvc2022_64
+
       - name: Install Qt
+        if: steps.qt-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -80,35 +91,34 @@ jobs:
           }
           "QT_PREFIX=$prefix" >> $env:GITHUB_ENV
 
+      - name: Export the Qt prefix
+        shell: pwsh
+        run: |
+          $prefix = "C:\Qt\$env:QT_VERSION\msvc2022_64"
+          if (-not (Test-Path $prefix)) { throw "no Qt at $prefix (cache hit but nothing there?)" }
+          "QT_PREFIX=$prefix" >> $env:GITHUB_ENV
+          Write-Host "Qt prefix: $prefix"
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/vcpkg_installed
+            ~/AppData/Local/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+
       # The runner ships vcpkg; the repo is in manifest mode, so configure
       # installs what vcpkg.json asks for.
-      - name: Configure
+      - name: Configure and build with MSVC
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake"
-          if (-not (Test-Path $vcpkg)) { throw "no vcpkg toolchain at $vcpkg" }
-          # KPXC_FEATURE_DOCS=OFF: the offline docs need asciidoctor, which the
-          # runner does not have, and they are not what is under test --
-          #   CMake Error at docs/CMakeLists.txt:18: asciidoctor is required
-          cmake -S . -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$vcpkg" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
-            -DCMAKE_PREFIX_PATH="$env:QT_PREFIX" `
-            -DWITH_TESTS=OFF `
-            -DWITH_XC_AUTOTYPE=ON `
-            -DKPXC_FEATURE_DOCS=OFF
-          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with $LASTEXITCODE" }
-
-      - name: Build
-        shell: pwsh
-        run: |
-          cmake --build build --parallel
-          if ($LASTEXITCODE -ne 0) { throw "build failed with $LASTEXITCODE" }
-          Get-ChildItem build -Recurse -Filter "KeePassXC.exe" | ForEach-Object {
-            Write-Host "built: $($_.FullName)  $([math]::Round($_.Length / 1MB, 1)) MB"
-          }
+          # One step, and inside VsDevCmd: see the header of the script for what
+          # went wrong when CMake was left to pick a compiler.
+          cmd /c ".github\scripts\build-keepassxc-msvc.bat x64"
+          if ($LASTEXITCODE -ne 0) { throw "the build script failed with $LASTEXITCODE" }
+          $exe = Get-ChildItem build -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
+          if (-not $exe) { throw "no KeePassXC.exe under build/" }
+          Write-Host "built: $($exe.FullName)  $([math]::Round($exe.Length / 1MB, 1)) MB"
 
       - name: Upload the build
         if: always()
