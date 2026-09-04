@@ -63,7 +63,14 @@ jobs:
           # Read the bytes directly: PowerShell 7 removed `Select-String -Encoding
           # Byte`, and this step is run by pwsh.
           $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path typehelper.exe))
-          $embedded = [System.Text.Encoding]::ASCII.GetString($bytes).Contains('uiAccess="true"')
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          # Quote-agnostic, and the element is printed. /MANIFESTUAC copies the
+          # value through verbatim, so the manifest carries single quotes --
+          # searching for uiAccess="true" reported "no manifest" on a binary
+          # that had one, which sent me looking at the wrong thing twice.
+          $element = [regex]::Match($text, '<requestedExecutionLevel[^>]*>')
+          Write-Host "requestedExecutionLevel: $($element.Value)"
+          $embedded = $element.Success -and ($element.Value -match 'uiAccess\s*=\s*.?true.?')
           Write-Host "manifest embedded: $embedded"
           if (-not $embedded) { throw "the built binary has no uiAccess manifest" }
           "helper=$(Resolve-Path typehelper.exe)" >> $env:GITHUB_OUTPUT
