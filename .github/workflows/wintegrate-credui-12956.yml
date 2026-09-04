@@ -84,10 +84,24 @@ jobs:
           HELPER: ${{ steps.build.outputs.helper }}
         run: |
           $log = Join-Path $env:RUNNER_TEMP 'unsigned.log'
-          $p = Start-Process -FilePath $env:HELPER -ArgumentList 'x', '200', $log -PassThru -Wait `
-                 -ErrorAction SilentlyContinue
-          Write-Host "exit code: $($p.ExitCode)"
+          # Refusing to start is the expected result here, and it is the whole
+          # reason #13070 was reverted -- so it is recorded rather than treated
+          # as a step failure. Windows surfaces it as
+          #   "A referral was returned from the server"
+          # which is not obviously about signing at all.
+          $started = $false
+          try {
+            $p = Start-Process -FilePath $env:HELPER -ArgumentList 'x', '200', $log -PassThru -Wait
+            $started = $true
+            Write-Host "unsigned helper started; exit code $($p.ExitCode)"
+          } catch {
+            Write-Host "unsigned helper refused to start: $($_.Exception.Message)"
+          }
           if (Test-Path $log) { Write-Host "log:"; Get-Content $log } else { Write-Host "no log written" }
+          Write-Host "MATRIX unsigned+user-writable -> started=$started"
+          if ($started) {
+            Write-Host "note: this build of Windows allowed it, so the portable-ZIP objection may not hold here"
+          }
 
       - name: Sign the helper and install it under Program Files
         shell: pwsh
