@@ -122,13 +122,47 @@ jobs:
           if (-not $exe) { throw "no KeePassXC.exe under build/" }
           Write-Host "built: $($exe.FullName)  $([math]::Round($exe.Length / 1MB, 1)) MB"
 
+      # A bare KeePassXC.exe cannot run: the dependencies are dynamic now, so Qt
+      # and the vcpkg libraries have to travel with it. Without this the artifact
+      # is only useful for proving that the tree compiles.
+      - name: Stage a runnable bundle
+        if: success()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'stage'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $exe = Get-ChildItem build -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
+          if (-not $exe) { throw "no KeePassXC.exe to stage" }
+          Copy-Item $exe.FullName $stage
+          Get-ChildItem build -Recurse -Filter 'keepassxc-cli.exe' |
+            Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName $stage }
+
+          # The helper, signed by the step above, so the bundle can exercise the
+          # delegated path where it is needed.
+          if ($env:CREDUI_UIACCESS_HELPER -and (Test-Path $env:CREDUI_UIACCESS_HELPER)) {
+            Copy-Item $env:CREDUI_UIACCESS_HELPER (Join-Path $stage 'keepassxc-uiaccess-helper.exe')
+          }
+
+          & "$env:QT_PREFIX\bin\windeployqt.exe" --release --no-translations `
+            --no-system-d3d-compiler --no-opengl-sw (Join-Path $stage 'KeePassXC.exe')
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with $LASTEXITCODE" }
+
+          $vcpkgBin = Join-Path $env:GITHUB_WORKSPACE 'build\vcpkg_installed\x64-windows\bin'
+          if (Test-Path $vcpkgBin) {
+            Copy-Item (Join-Path $vcpkgBin '*.dll') $stage -Force
+          }
+
+          $count = (Get-ChildItem $stage -Recurse -File | Measure-Object).Count
+          $size = [math]::Round(((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
+          Write-Host "staged $count files, $size MB"
+
       - name: Upload the build
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: keepassxc-windows-x64
-          path: |
-            build/src/KeePassXC.exe
-            build/src/keepassxc-cli.exe
+          path: stage/
           if-no-files-found: warn
           retention-days: 7
