@@ -59,9 +59,10 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DWITH_TESTS=ON \
-            -DWITH_XC_AUTOTYPE=ON \
             -DKPXC_FEATURE_DOCS=OFF
-          cmake --build build --parallel --target testautotype testentry testgroup testkeepass2format
+          # Target names taken from tests/CMakeLists.txt; WITH_XC_AUTOTYPE is not
+          # a variable this project has, and cmake only warns about that.
+          cmake --build build --parallel --target testautotype testentry testgroup testdatabase testmerge
 
       - name: Run them
         working-directory: build
@@ -70,4 +71,4 @@ jobs:
           # Xvfb because the Auto-Type test needs a display; without one the
           # suite aborts before running and the job would still look green if
           # the exit code were not checked.
-          xvfb-run -a ctest -R "testautotype|testentry|testgroup|testkeepass2format" --output-on-failure
+          xvfb-run -a ctest -R "testautotype|testentry|testgroup|testdatabase|testmerge" --output-on-failure
