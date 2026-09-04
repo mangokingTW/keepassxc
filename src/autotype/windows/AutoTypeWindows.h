@@ -27,7 +27,10 @@
 #include "autotype/AutoTypeAction.h"
 #include "autotype/AutoTypePlatform.h"
 
+#include <QScopedPointer>
+
 class WinUtils;
+class UiAccessInjector;
 
 class AutoTypePlatformWin : public QObject, public AutoTypePlatformInterface
 {
@@ -35,11 +38,16 @@ class AutoTypePlatformWin : public QObject, public AutoTypePlatformInterface
 
 public:
     explicit AutoTypePlatformWin();
+    // In the .cpp: QScopedPointer needs the complete type there.
+    ~AutoTypePlatformWin() override;
     bool isAvailable() override;
     QStringList windowTitles() override;
     WId activeWindow() override;
     QString activeWindowTitle() override;
     bool raiseWindow(WId window) override;
+    // Decided here rather than in raiseWindow; see AutoTypePlatform.h.
+    void beginSequence(WId window) override;
+    void endSequence() override;
     AutoTypeExecutor& executor() const override;
 
     void sendCharVirtual(const QChar& ch);
@@ -48,6 +56,20 @@ public:
 
 private:
     AutoTypeExecutor* m_executor = nullptr;
+    // Inactive when no helper is available. See UiAccessInjector.
+    QScopedPointer<UiAccessInjector> m_injector;
+    // Set for the whole sequence: a helper that dies halfway must not fall
+    // back to ::SendInput.
+    bool m_delegating = false;
+    bool m_delegationFailed = false;
+
+public:
+    /** Ok, or a failure when a delegated sequence stopped part-way. */
+    AutoTypeAction::Result sequenceResult() const;
+
+private:
+    // The single exit for injected input.
+    bool sendInputs(INPUT* inputs, int count);
 
     static bool isExtendedKey(DWORD nativeKeyCode);
     static bool isAltTabWindow(HWND hwnd);

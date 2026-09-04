@@ -21,6 +21,7 @@
 #include <QApplication>
 #include <QDebug>
 #include <QRegularExpression>
+#include <QScopeGuard>
 
 #include "config-keepassx.h"
 
@@ -344,39 +345,53 @@ void AutoType::executeAutoTypeActions(const Entry* entry,
         window = m_platform->activeWindow();
     }
 
-    for (const auto& action : asConst(actions)) {
-        // Cancel Auto-Type if the active window changed
-        if (m_platform->activeWindow() != window) {
-            qWarning("Active window changed, interrupting auto-type.");
-            break;
-        }
+    // Scoped so the sequence is torn down before the lock is released and
+    // autotypeFinished() is emitted: a slot that starts the next sequence
+    // synchronously would otherwise have this one's guard shut down the helper
+    // the new sequence had just started.
+    {
+        // The first point at which the target is known on both paths.
+        m_platform->beginSequence(window);
+        // Paired by scope, not by reaching the end: the loop below shows a message
+        // box and pumps events, so it can be left through a nested event loop or a
+        // quit, and a platform that started something privileged for this sequence
+        // must not have it outlive the function.
+        const QScopeGuard endSequence = qScopeGuard([this] { m_platform->endSequence(); });
 
-        bool failed = false;
-        constexpr int max_retries = 5;
-        for (int i = 1; i <= max_retries; i++) {
-            auto result = action->exec(m_platform->executor());
-
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-
-            if (result.isOk()) {
+        for (const auto& action : asConst(actions)) {
+            // Cancel Auto-Type if the active window changed
+            if (m_platform->activeWindow() != window) {
+                qWarning("Active window changed, interrupting auto-type.");
                 break;
             }
 
-            if (!result.canRetry() || i == max_retries) {
-                if (getMainWindow()) {
-                    MessageBox::critical(getMainWindow(), tr("Auto-Type Error"), result.errorString());
+            bool failed = false;
+            constexpr int max_retries = 5;
+            for (int i = 1; i <= max_retries; i++) {
+                auto result = action->exec(m_platform->executor());
+
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+
+                if (result.isOk()) {
+                    break;
                 }
-                failed = true;
-                break;
+
+                if (!result.canRetry() || i == max_retries) {
+                    if (getMainWindow()) {
+                        MessageBox::critical(getMainWindow(), tr("Auto-Type Error"), result.errorString());
+                    }
+                    failed = true;
+                    break;
+                }
+
+                // Retry wait delay
+                Tools::wait(100);
             }
 
-            // Retry wait delay
-            Tools::wait(100);
-        }
-
-        // Last action failed to complete, cancel the rest of the sequence
-        if (failed) {
-            break;
+            // Last action failed to complete, cancel the rest of the sequence
+            if (failed) {
+                break;
+            }
         }
     }
 

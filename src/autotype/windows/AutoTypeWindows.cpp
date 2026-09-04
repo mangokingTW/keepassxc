@@ -17,6 +17,8 @@
  */
 
 #include "AutoTypeWindows.h"
+#include "UiAccessInjector.h"
+#include "core/Config.h"
 #include "core/Tools.h"
 #include "gui/osutils/OSUtils.h"
 #include "gui/osutils/winutils/WinUtils.h"
@@ -33,8 +35,12 @@
 //
 AutoTypePlatformWin::AutoTypePlatformWin()
     : m_executor(new AutoTypeExecutorWin(this))
+    , m_injector(new UiAccessInjector)
 {
 }
+
+// Out of line so QScopedPointer sees the complete UiAccessInjector.
+AutoTypePlatformWin::~AutoTypePlatformWin() = default;
 
 //
 // Test if os version is Windows 7 or later
@@ -88,6 +94,69 @@ bool AutoTypePlatformWin::raiseWindow(WId window)
 }
 
 //
+// Delegation for the sequence about to be typed
+//
+// With no helper available, begin() returns false and everything keeps using
+// ::SendInput, exactly as before.
+//
+void AutoTypePlatformWin::beginSequence(WId window)
+{
+    if (!m_injector) {
+        return;
+    }
+    HWND hwnd = reinterpret_cast<HWND>(window);
+    m_injector->end();
+    m_delegating = false;
+    m_delegationFailed = false;
+    if (!UiAccessInjector::isBrokeredCredentialDialog(hwnd)) {
+        return;
+    }
+    if (!config()->get(Config::Security_AutoTypeCredentialPrompts).toBool()) {
+        qWarning("Auto-Type: this window only accepts input from a privileged process; set "
+                 "Security/AutoTypeCredentialPrompts to allow delegating to the uiAccess helper");
+        return;
+    }
+    m_delegating = m_injector->begin(hwnd);
+    if (!m_delegating) {
+        qWarning("Auto-Type: this window only accepts input from a privileged process, "
+                 "and no uiAccess helper is available");
+    }
+}
+
+void AutoTypePlatformWin::endSequence()
+{
+    m_delegating = false;
+    m_delegationFailed = false;
+    if (m_injector) {
+        m_injector->end();
+    }
+}
+
+//
+// Single exit for injected input
+//
+// Delegation applies to a whole sequence or not at all: once delegated there is
+// no fallback, because ::SendInput would deliver the rest of a password to
+// whatever holds the foreground.
+//
+bool AutoTypePlatformWin::sendInputs(INPUT* inputs, int count)
+{
+    if (!m_delegating) {
+        return ::SendInput(count, inputs, sizeof(INPUT)) == static_cast<UINT>(count);
+    }
+    if (m_injector && m_injector->active() && m_injector->send(inputs, count)) {
+        return true;
+    }
+    // Once per sequence, not per keystroke. Without it the sequence stops
+    // part-way with nothing in the log -- what the bug itself looks like.
+    if (!m_delegationFailed) {
+        m_delegationFailed = true;
+        qWarning("Auto-Type: the uiAccess helper stopped accepting input, so the sequence was cut short");
+    }
+    return false;
+}
+
+//
 // Send unicode character to foreground window
 //
 void AutoTypePlatformWin::sendChar(const QChar& ch)
@@ -103,7 +172,7 @@ void AutoTypePlatformWin::sendChar(const QChar& ch)
     in[1] = in[0];
     in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
 
-    ::SendInput(2, &in[0], sizeof(INPUT));
+    sendInputs(&in[0], 2);
 }
 
 void AutoTypePlatformWin::sendCharVirtual(const QChar& ch)
@@ -140,7 +209,7 @@ void AutoTypePlatformWin::sendCharVirtual(const QChar& ch)
     in[1] = in[0];
     in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
 
-    ::SendInput(2, &in[0], sizeof(INPUT));
+    sendInputs(&in[0], 2);
 
     if (HIBYTE(vKey) & 0x6) {
         setKeyState(Qt::Key_AltGr, false);
@@ -179,7 +248,7 @@ void AutoTypePlatformWin::setKeyState(Qt::Key key, bool down)
     in.ki.time = 0;
     in.ki.dwExtraInfo = ::GetMessageExtraInfo();
 
-    ::SendInput(1, &in, sizeof(INPUT));
+    sendInputs(&in, 1);
 }
 
 //
@@ -287,6 +356,19 @@ AutoTypeAction::Result AutoTypeExecutorWin::execBegin(const AutoTypeBegin* actio
     return AutoTypeAction::Result::Ok();
 }
 
+// A delegated sequence that stopped part-way must not report success: the
+// senders are void and discard the result, so this is the only place left where
+// "the helper went away after eight characters" can still become an error
+// instead of a half-typed password the user is invited to submit.
+AutoTypeAction::Result AutoTypePlatformWin::sequenceResult() const
+{
+    if (m_delegationFailed) {
+        return AutoTypeAction::Result::Failed(
+            QObject::tr("Auto-Type was interrupted: the privileged helper stopped accepting input"));
+    }
+    return AutoTypeAction::Result::Ok();
+}
+
 AutoTypeAction::Result AutoTypeExecutorWin::execType(const AutoTypeKey* action)
 {
     if (action->modifiers & Qt::ShiftModifier) {
@@ -327,7 +409,7 @@ AutoTypeAction::Result AutoTypeExecutorWin::execType(const AutoTypeKey* action)
     }
 
     Tools::sleep(execDelayMs);
-    return AutoTypeAction::Result::Ok();
+    return m_platform->sequenceResult();
 }
 
 AutoTypeAction::Result AutoTypeExecutorWin::execClearField(const AutoTypeClearField* action)
@@ -336,5 +418,5 @@ AutoTypeAction::Result AutoTypeExecutorWin::execClearField(const AutoTypeClearFi
     execType(new AutoTypeKey(Qt::Key_Home, Qt::ControlModifier));
     execType(new AutoTypeKey(Qt::Key_End, Qt::ControlModifier | Qt::ShiftModifier));
     execType(new AutoTypeKey(Qt::Key_Backspace));
-    return AutoTypeAction::Result::Ok();
+    return m_platform->sequenceResult();
 }
