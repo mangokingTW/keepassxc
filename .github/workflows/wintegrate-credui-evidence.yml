@@ -501,6 +501,11 @@ jobs:
 
   pair:
     name: the pair
+    # always(), because a skipped dependency skips this too -- and it was
+    # skipped in a run where both halves passed, which is precisely the state
+    # this job exists to make impossible to miss. It fails closed: a missing
+    # artifact is a failure, not an absence.
+    if: always()
     needs: verify
     runs-on: ubuntu-latest
     steps:
