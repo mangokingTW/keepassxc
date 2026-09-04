@@ -1,27 +1,37 @@
 # Records the same run against a patched build and against a control build with
 # the patch removed, so the pair can be looked at rather than described.
 #
-# A reproduction with nothing to compare against proves that the patched build
-# fills in the credential prompt; it does not prove an unpatched one cannot. So
-# both variants are built here by the same steps, from the same Qt, with the
-# same signed helper installed, and the only difference is `src/autotype`.
+# A reproduction with nothing to compare against shows that the patched build
+# fills in the credential prompt; it does not show that an unpatched one cannot.
+# Both variants are built by the same steps, from the same Qt, with the same
+# signed helper installed, and the only difference is `src/autotype`.
 #
-# Two things this workflow has to get right or the control lies:
+# Building and verifying are separate jobs. The build is the hour; the
+# verification is a couple of minutes and is the part that gets iterated on, so
+# `reuse_run_id` points a fresh verification at the bundles an earlier run
+# already produced. A red job also says which half broke without anyone reading
+# a log.
+#
+# Two things the verification has to get right or the control lies:
 #
 #   1. **Integrity.** A hosted runner is elevated, and a High-integrity process
 #      may inject into the credential prompt whether or not the patch is
-#      present. The harness is therefore started through
-#      run_at_medium_integrity.py, and everything it launches inherits Medium --
-#      the level an ordinary user actually has. An earlier attempt skipped this
-#      and the reproduction XPASSed, which read as "the bug is gone".
+#      present. The harness is started through run_at_medium_integrity.py, and
+#      the run is rejected unless KeePassXC came up at Medium. An earlier
+#      attempt skipped this and the reproduction XPASSed, which read as "the bug
+#      is gone".
 #   2. **Which binary ran.** The built exe is searched for the patch's own
-#      strings and the result is required to match the variant, in both
-#      directions. A control that quietly contains the fix would pass every
-#      other check here.
+#      strings and the result has to match the variant, in both directions. A
+#      control that quietly contained the fix would pass everything else here.
 name: "Evidence for #12956 (patched vs control)"
 
 on:
   workflow_dispatch:
+    inputs:
+      reuse_run_id:
+        description: "Run id whose kpxc-stage-* artifacts to verify instead of building again"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -36,14 +46,22 @@ env:
   DB_PASSWORD: autotype1
   ENTRY_TITLE: Windows
   ENTRY_USERNAME: probeuser
+  # The reading that explains a recording with a hole in it landed in 0.5.11;
+  # recording with anything older would produce artifacts that cannot say why a
+  # window is missing.
+  WINTEGRATE_VERSION: ">=0.5.11"
 
 jobs:
-  evidence:
+  build:
+    # Skipped entirely when an earlier run's bundles are being reused. `inputs`
+    # is one of the few contexts a job-level `if` can see -- `matrix` is not,
+    # and putting it here breaks the whole file at parse time.
+    if: github.event.inputs.reuse_run_id == ''
     strategy:
       fail-fast: false
       matrix:
         variant: [patched, control]
-    name: "${{ matrix.variant }}"
+    name: "build ${{ matrix.variant }}"
     runs-on: windows-latest
     timeout-minutes: 150
     steps:
@@ -62,13 +80,6 @@ jobs:
           # Printed, because "only src/autotype differs" is a claim this job
           # makes about itself.
           git --no-pager diff --stat -- src
-
-      # Also quiets the runner: an onboarding window that owns the foreground
-      # swallows every injected keystroke, and this run is entirely about which
-      # window receives input.
-      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
-        with:
-          wintegrate-version: ">=0.5.10"
 
       - uses: actions/setup-python@v5
         with:
@@ -120,9 +131,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cmake --install failed with $LASTEXITCODE" }
           $exe = Get-ChildItem $stage -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
           if (-not $exe) { throw "the install produced no KeePassXC.exe" }
+          $cli = Join-Path $exe.DirectoryName 'keepassxc-cli.exe'
+
+          # Both binaries, and the compiler runtime with them. windeployqt
+          # resolves dependencies per binary, and the CLI is the one the
+          # verification needs first: deployed for the GUI alone it started and
+          # died with 0xC0000135 (STATUS_DLL_NOT_FOUND), which surfaced only as
+          # "db-create failed with -1073741515".
           & "$env:QT_PREFIX\bin\windeployqt.exe" --release --no-translations `
-            --no-system-d3d-compiler --no-opengl-sw $exe.FullName
+            --no-system-d3d-compiler --no-opengl-sw --compiler-runtime `
+            $exe.FullName $cli
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with $LASTEXITCODE" }
+
           # cmake --install rather than hand-picked DLLs: a bundle assembled by
           # hand ran but could not unlock any database, because the data
           # directory and ssl/certs were not where the app looks for them.
@@ -131,14 +151,28 @@ jobs:
               throw "$expected is missing next to the exe"
             }
           }
-          "KPXC_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
-          "KPXC_CLI=$(Join-Path $exe.DirectoryName 'keepassxc-cli.exe')" >> $env:GITHUB_ENV
+
+          # Asked here rather than discovered in the verification as an exit code
+          # nobody can read: a console binary that cannot load a DLL exits with
+          # 0xC0000135 and prints nothing at all.
+          & $cli --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "keepassxc-cli --version exited $LASTEXITCODE (0x$('{0:X8}' -f $LASTEXITCODE))"
+            Get-ChildItem $exe.DirectoryName | Select-Object Name, Length |
+              Format-Table -AutoSize | Out-String | Write-Host
+            $dumpbin = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio" -Recurse `
+              -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($dumpbin) { & $dumpbin.FullName /dependents $cli | Write-Host }
+            throw "keepassxc-cli cannot start, so this bundle is not verifiable"
+          }
+
+          "STAGE_DIR=$($exe.DirectoryName)" >> $env:GITHUB_ENV
 
       - name: Check the built binary matches the variant
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $bytes = [System.IO.File]::ReadAllBytes($env:KPXC_EXE)
+          $bytes = [System.IO.File]::ReadAllBytes((Join-Path $env:STAGE_DIR 'KeePassXC.exe'))
           $wide = [System.Text.Encoding]::Unicode.GetString($bytes)
           $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
           # The pipe name is a wide literal; the warning text is narrow. Both are
@@ -146,11 +180,66 @@ jobs:
           $patched = $wide.Contains('keepassxc-uiaccess-') -or
                      $ascii.Contains('only accepts input from a privileged process')
           Write-Host "variant=${{ matrix.variant }} binary_contains_patch=$patched"
-          # Asserted in both directions: a control that quietly contains the fix
-          # would pass everything else in this job.
           $expected = '${{ matrix.variant }}' -eq 'patched'
           if ($patched -ne $expected) {
             throw "the ${{ matrix.variant }} build reports binary_contains_patch=$patched"
+          }
+
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: kpxc-stage-${{ matrix.variant }}
+          path: stage/
+          retention-days: 14
+
+  verify:
+    # `always()` rather than success(): the build job is skipped on purpose when
+    # bundles are reused, and a skipped dependency would otherwise skip this too.
+    if: always()
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [patched, control]
+    name: "verify ${{ matrix.variant }}"
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # Also quiets the runner: an onboarding window that owns the foreground
+      # swallows every injected keystroke, and this run is entirely about which
+      # window receives input.
+      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
+        with:
+          wintegrate-version: ${{ env.WINTEGRATE_VERSION }}
+
+      - name: Download the bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: kpxc-stage-${{ matrix.variant }}
+          path: stage
+          # Empty means "this run", which is what actions/download-artifact does
+          # by default; a run id points at bundles an earlier run built.
+          run-id: ${{ github.event.inputs.reuse_run_id }}
+          github-token: ${{ github.event.inputs.reuse_run_id != '' && github.token || '' }}
+
+      - name: Locate the binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem stage -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
+          if (-not $exe) { throw "the downloaded bundle has no KeePassXC.exe" }
+          "KPXC_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          "KPXC_CLI=$(Join-Path $exe.DirectoryName 'keepassxc-cli.exe')" >> $env:GITHUB_ENV
+
+          # The claim this job makes about which build it is measuring, re-checked
+          # after the artifact round trip rather than inherited from the build job.
+          $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+          $patched = [System.Text.Encoding]::Unicode.GetString($bytes).Contains('keepassxc-uiaccess-')
+          Write-Host "variant=${{ matrix.variant }} binary_contains_patch=$patched"
+          if ($patched -ne ('${{ matrix.variant }}' -eq 'patched')) {
+            throw "the downloaded ${{ matrix.variant }} bundle does not match its label"
           }
 
       - name: Build, sign and install the uiAccess helper
@@ -158,13 +247,9 @@ jobs:
         working-directory: src/autotype/windows/uiaccess-helper
         run: |
           $ErrorActionPreference = 'Stop'
-          # Built from the patched branch's copy even for the control variant:
-          # the helper is not the thing under test, and leaving it out would make
-          # "the control has no helper" an alternative explanation for its
-          # failure.
-          if (-not (Test-Path typehelper.c)) {
-            git checkout ${{ github.sha }} -- .
-          }
+          # Installed for both variants: the helper is not the thing under test,
+          # and leaving it out would make "the control has no helper" an
+          # alternative explanation for the control's failure.
           cmd /c "build.bat x64"
           if ($LASTEXITCODE -ne 0) { throw "build.bat failed with $LASTEXITCODE" }
 
@@ -238,7 +323,6 @@ jobs:
             --result $result `
             --artifacts $artifacts
           Write-Host "harness exit code: $LASTEXITCODE"
-          "HARNESS_EXIT=$LASTEXITCODE" >> $env:GITHUB_ENV
 
       - name: Judge this variant
         shell: pwsh
@@ -268,7 +352,6 @@ jobs:
           if ($outcome.submitted -ne $expected) {
             throw "${{ matrix.variant }}: expected submitted=$expected, measured $($outcome.submitted)"
           }
-          "SUBMITTED=$($outcome.submitted)" >> $env:GITHUB_ENV
 
       - name: Upload the recording and the timeline
         if: always()
@@ -282,7 +365,7 @@ jobs:
 
   pair:
     name: the pair
-    needs: evidence
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -290,10 +373,10 @@ jobs:
           pattern: credui-evidence-*
           path: evidence
 
-      # The two jobs above each check their own half. This job exists so that
-      # "one of them did not run" cannot look like a pass: a matrix leg that is
-      # skipped or cancelled leaves no artifact, and the summary line for the
-      # workflow would otherwise still be green.
+      # Each verify job checks its own half. This job exists so that "one of
+      # them did not run" cannot look like a pass: a matrix leg that is skipped
+      # or cancelled leaves no artifact, and the workflow's summary line would
+      # otherwise still be green.
       - name: Require both halves
         run: |
           set -o pipefail
