@@ -151,9 +151,16 @@ class ForegroundTrace:
     throughout.
     """
 
-    def __init__(self, session, interval: float = 0.1):
+    def __init__(self, session, interval: float = 0.1, allowed: set[int] | None = None):
         self.session = session
         self.interval = interval
+        # When given, anything else that takes the foreground is pushed back
+        # down. The helper drops input whose target is not in front -- it has to,
+        # or a delayed keystroke lands in whatever window arrived instead -- so a
+        # window that returns mid-sequence silently eats the whole sequence.
+        # On this runner the agent's terminal came back 1.5s after the prompt.
+        self.allowed = allowed or set()
+        self.interventions: list[dict] = []
         self.samples: list[tuple[float, int, str, str]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -174,6 +181,13 @@ class ForegroundTrace:
                     round(time.monotonic() - start, 2), hwnd,
                     w.get_window_class(hwnd) or "", (w.get_window_title(hwnd) or "")[:40],
                 ))
+            if self.allowed and hwnd and hwnd not in self.allowed:
+                self.interventions.append({
+                    "t": round(time.monotonic() - start, 2), "hwnd": hex(hwnd),
+                    "class": w.get_window_class(hwnd) or "",
+                    "title": (w.get_window_title(hwnd) or "")[:40],
+                })
+                user32.ShowWindow(wintypes.HWND(hwnd), 6)  # SW_MINIMIZE
             time.sleep(self.interval)
 
     def __exit__(self, *exc):
@@ -187,6 +201,8 @@ class ForegroundTrace:
             f"{len(self.samples)} changes while auto-type ran",
             samples=[{"t": t, "hwnd": hex(h), "class": c, "title": ti}
                      for t, h, c, ti in self.samples],
+            pushed_back=self.interventions[:12],
+            pushed_back_count=len(self.interventions),
         )
         return False
 
@@ -485,7 +501,9 @@ def run(session) -> int:
         if w.get_foreground_window() != window.hwnd:
             raise AssertionError("KeePassXC was not active when auto-type fired")
 
-    with session.step("perform auto-type"), ForegroundTrace(session):
+    with session.step("perform auto-type"), ForegroundTrace(
+        session, allowed={window.hwnd, prompt.hwnd}
+    ):
         w.send_hotkey("ctrl+shift+v")
         time.sleep(2.5)
         # KeePassXC asks before typing into a window that is not its own. The
