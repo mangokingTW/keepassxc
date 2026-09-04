@@ -385,6 +385,19 @@ jobs:
         shell: pwsh
         run: |
           $artifacts = Join-Path $env:GITHUB_WORKSPACE 'evidence-artifacts'
+          New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+
+          # Watches for the uiAccess helper for the length of the run. Without
+          # it, "the prompt was not filled in" cannot be told apart from "the
+          # helper never started", and those have different causes: the first is
+          # the pipe or the injection, the second is the predicate that decides
+          # whether to delegate at all. KeePassXC's own stderr covers a third
+          # case -- begin() tried and failed -- and it was empty here, which is
+          # what makes this distinction the open question.
+          $watchLog = Join-Path $artifacts 'helper-watch.log'
+          $watcher = Start-Process -FilePath python -PassThru `
+            -ArgumentList 'tests\ui-credui\helper_watch.py', '150' `
+            -RedirectStandardOutput $watchLog -WindowStyle Hidden
           $result = Join-Path $env:RUNNER_TEMP 'credui_result.txt'
           Remove-Item $result -ErrorAction SilentlyContinue
 
@@ -402,6 +415,10 @@ jobs:
             --result $result `
             --artifacts $artifacts
           Write-Host "harness exit code: $LASTEXITCODE"
+          Stop-Process -Id $watcher.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "--- helper watcher:"
+          if (Test-Path $watchLog) { Get-Content $watchLog | Write-Host }
+          else { Write-Host "(the watcher wrote nothing)" }
           # Expected to be non-zero for the control variant -- the harness
           # reports "the prompt was never submitted" that way -- and this step
           # is not the judge. The next one reads the event timeline, which can
