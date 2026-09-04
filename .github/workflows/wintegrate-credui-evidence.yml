@@ -351,6 +351,36 @@ jobs:
 
           "KPXC_DB=$db" >> $env:GITHUB_ENV
 
+      - name: Give KeePassXC a deterministic first run
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Without this, the first launch puts up a modal asking "Check for
+          # updates on startup?" -- KeePassXC's own dialog, owned by its main
+          # window. UIA keeps working through it and the main window can even be
+          # brought back to the foreground, but it swallows every keystroke, so
+          # the run failed as "the database stayed locked" with no call
+          # reporting an error.
+          #
+          # MainWindow::performUpdateCheck gates it on UpdateCheckMessageShown,
+          # so seeding that key is enough; CheckForUpdates=false also keeps the
+          # run off the network. Measured rather than assumed: the local VM
+          # where this passed already had UpdateCheckMessageShown=true in its
+          # config, which is exactly why it never saw the dialog.
+          $dir = Join-Path $env:APPDATA 'KeePassXC'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $ini = Join-Path $dir 'keepassxc.ini'
+          @(
+            '[General]'
+            'ConfigVersion=2'
+            'UpdateCheckMessageShown=true'
+            ''
+            '[GUI]'
+            'CheckForUpdates=false'
+          ) | Set-Content -Path $ini -Encoding ASCII
+          Write-Host "wrote $ini"
+          Get-Content $ini | Write-Host
+
       - name: Run the harness at medium integrity
         shell: pwsh
         run: |

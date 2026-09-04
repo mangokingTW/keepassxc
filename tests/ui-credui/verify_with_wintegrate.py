@@ -160,6 +160,17 @@ def ensure_foreground(session, window, attempts: int = 6) -> None:
                 session.log_event("foreground", "recovered", attempts=attempt + 1)
             return
         log_window(session, "foreground_thief", foreground)
+        # A modal of the application under test is a different problem, and
+        # minimising it does not solve it: the main window comes back to the
+        # foreground while the modal keeps swallowing every keystroke, which is
+        # how "the database stayed locked" appeared with every call reporting
+        # success. Named here instead, so the fix is to stop it appearing.
+        if user32.GetWindow(wintypes.HWND(foreground), 4) == window.hwnd:
+            raise AssertionError(
+                f"{w.get_window_title(foreground)!r} is a modal dialog of the window "
+                "under test; it holds the foreground and input to the main window "
+                "will be swallowed. Seed the setting that suppresses it."
+            )
         user32.ShowWindow(wintypes.HWND(foreground), 6)  # SW_MINIMIZE
         time.sleep(0.4)
     raise AssertionError(
