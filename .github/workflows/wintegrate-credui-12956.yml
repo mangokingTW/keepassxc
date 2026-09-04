@@ -53,41 +53,15 @@ jobs:
         working-directory: src/autotype/windows/uiaccess-helper
         run: |
           $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere)) { throw "vswhere is not at $vswhere" }
-          $vs = & $vswhere -latest -products * -property installationPath
-          if (-not $vs) { throw "vswhere found no Visual Studio installation" }
-          $devcmd = Join-Path $vs "Common7\Tools\VsDevCmd.bat"
-          Write-Host "VsDevCmd: $devcmd"
-
-          # /MANIFESTUAC rather than /MANIFESTINPUT with the .manifest file: the
-          # linker emits its own manifest snippet carrying uiAccess="false", and
-          # merging that with a snippet saying "true" is a hard error --
-          #   manifest authoring error c1010001: Values of attribute "uiAccess"
-          #   not equal in different manifest snippets
-          #   LINK : fatal error LNK1327: failure during running mt.exe
-          # The .manifest file stays for the mingw path, where windres compiles
-          # it through typehelper.rc. Either way it must be *embedded*: an
-          # external .manifest file is ignored for UAC settings, so uiAccess
-          # would silently never be granted.
-          $cl = @(
-            'cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS typehelper.c',
-            '/Fe:typehelper.exe',
-            # advapi32 for OpenProcessToken/GetTokenInformation: mingw links it
-            # by default, so the missing entry only showed up here.
-            '/link user32.lib shell32.lib advapi32.lib',
-            '/MANIFEST:EMBED',
-            '/MANIFESTUAC:"level=''asInvoker'' uiAccess=''true''"'
-          ) -join ' '
-          cmd /c "`"$devcmd`" -arch=${{ matrix.vsarch }} -no_logo && $cl"
-          if ($LASTEXITCODE -ne 0) { throw "cl failed with $LASTEXITCODE" }
+          # The build lives in build.bat: /MANIFESTUAC's value contains double
+          # quotes, and passing those through `cmd /c "<vsdevcmd> && cl ..."`
+          # dropped them -- the link succeeded and the manifest was absent.
+          cmd /c "build.bat ${{ matrix.vsarch }}"
+          if ($LASTEXITCODE -ne 0) { throw "build.bat failed with $LASTEXITCODE" }
           if (-not (Test-Path typehelper.exe)) { throw "typehelper.exe was not produced" }
 
-          # Reported so a run that lost the manifest is distinguishable from one
-          # where the dialog refused the input.
           # Read the bytes directly: PowerShell 7 removed `Select-String -Encoding
-          # Byte`, and the step is run by pwsh, so the check itself failed while
-          # the compile had succeeded.
+          # Byte`, and this step is run by pwsh.
           $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path typehelper.exe))
           $embedded = [System.Text.Encoding]::ASCII.GetString($bytes).Contains('uiAccess="true"')
           Write-Host "manifest embedded: $embedded"
