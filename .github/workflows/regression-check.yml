@@ -71,4 +71,8 @@ jobs:
           # Xvfb because the Auto-Type test needs a display; without one the
           # suite aborts before running and the job would still look green if
           # the exit code were not checked.
-          xvfb-run -a ctest -R "testautotype|testentry|testgroup|testdatabase|testmerge" --output-on-failure
+          # Anchored, because ctest -R is a substring match: "testentry" also
+          # selects testentrymodel and testentrysearcher, which this job does
+          # not build, and a Not Run test fails the whole ctest invocation.
+          xvfb-run -a ctest --output-on-failure \
+            -R "^(testautotype|testentry|testgroup|testdatabase|testmerge)$"
