@@ -16,8 +16,8 @@
 #
 #   1. **Integrity.** A hosted runner is elevated, and a High-integrity process
 #      may inject into the credential prompt whether or not the patch is
-#      present. The harness is started through run_at_medium_integrity.py, and
-#      the run is rejected unless KeePassXC came up at Medium. An earlier
+#      present. The harness starts KeePassXC through run_at_medium_integrity.py,
+#      and the run is rejected unless KeePassXC came up at Medium. An earlier
 #      attempt skipped this and the reproduction XPASSed, which read as "the bug
 #      is gone".
 #   2. **Which binary ran.** The built exe is searched for the patch's own
@@ -46,10 +46,15 @@ env:
   DB_PASSWORD: autotype1
   ENTRY_TITLE: Windows
   ENTRY_USERNAME: probeuser
-  # The reading that explains a recording with a hole in it landed in 0.5.11;
-  # recording with anything older would produce artifacts that cannot say why a
-  # window is missing.
-  WINTEGRATE_VERSION: ">=0.5.11"
+  # 0.5.11 has the reading that explains a recording with a hole in it. 0.5.14
+  # is required, not merely preferred: before it the runner sweep killed
+  # WindowsTerminal by name, and this step's console is hosted by it -- shared,
+  # measured here, with pwsh.exe and Runner.Worker.exe. So the sweep killed the
+  # harness a second after Session() called it, and the runner's own worker
+  # with it, which is why the step came back cancelled rather than failed.
+  # 0.5.13 tried to spare it and asked the wrong question; 0.5.14 asks
+  # GetConsoleProcessList, which answers for a windowless ConPTY.
+  WINTEGRATE_VERSION: ">=0.5.14"
 
 jobs:
   build:
@@ -119,8 +124,28 @@ jobs:
       - name: Build KeePassXC
         shell: pwsh
         run: |
-          cmd /c ".github\scripts\build-keepassxc-msvc.bat x64"
-          if ($LASTEXITCODE -ne 0) { throw "the build script failed with $LASTEXITCODE" }
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          if (-not $vs) { throw "vswhere found no Visual Studio installation" }
+
+          # Configure and build inside VsDevCmd, in one cmd invocation because
+          # the environment it sets does not survive the step. cl is named
+          # explicitly: left to itself CMake picks up the mingw gcc on the
+          # runner's PATH, and the link then fails against vcpkg's MSVC-built
+          # libraries. The triplet is x64-windows and not -static, whose botan is
+          # /MT while Qt and this project are /MD (LNK2038).
+          $configure = @(
+            'cmake -S . -B build -G Ninja',
+            '-DCMAKE_BUILD_TYPE=Release',
+            '-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl',
+            "-DCMAKE_TOOLCHAIN_FILE=`"$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake`"",
+            '-DVCPKG_TARGET_TRIPLET=x64-windows',
+            "-DCMAKE_PREFIX_PATH=`"$env:QT_PREFIX`"",
+            '-DWITH_TESTS=OFF -DWITH_XC_AUTOTYPE=ON -DKPXC_FEATURE_DOCS=OFF'
+          ) -join ' '
+          cmd /c "call `"$vs\Common7\Tools\VsDevCmd.bat`" -arch=x64 -no_logo && $configure && cmake --build build --parallel"
+          if ($LASTEXITCODE -ne 0) { throw "the build failed with $LASTEXITCODE" }
 
       - name: Install into a staging directory
         shell: pwsh
@@ -153,6 +178,29 @@ jobs:
               throw "$expected is missing next to the exe"
             }
           }
+
+          # The helper has to be installed by `cmake --install`, beside the
+          # application, the same way keepassxc-cli and keepassxc-proxy are --
+          # that is the only place the injector looks. Asserted for both
+          # variants: the helper lives outside src/autotype, so the control
+          # builds it too, and "the control had no helper" is therefore never an
+          # alternative explanation for the control's failure.
+          Write-Host "installed beside KeePassXC.exe:"
+          Get-ChildItem $exe.DirectoryName -Filter '*.exe' |
+            Select-Object -ExpandProperty Name | ForEach-Object { Write-Host "  $_" }
+          $helper = Join-Path $exe.DirectoryName 'keepassxc-uiaccess-helper.exe'
+          if (-not (Test-Path $helper)) {
+            throw "cmake --install did not put keepassxc-uiaccess-helper.exe beside KeePassXC.exe"
+          }
+
+          # And it has to carry uiAccess in its *embedded* manifest. A helper
+          # built without it starts fine and silently behaves like the
+          # unpatched build, so the absence would look like the fix not working.
+          $helperBytes = [System.IO.File]::ReadAllBytes($helper)
+          if (-not [System.Text.Encoding]::ASCII.GetString($helperBytes).Contains('uiAccess="true"')) {
+            throw "the installed helper carries no embedded uiAccess manifest"
+          }
+          Write-Host "helper manifest requests uiAccess"
 
           # The third-party runtime, which neither of the two steps above
           # provides: cmake --install installs this project's own targets and
@@ -266,43 +314,54 @@ jobs:
           run-id: ${{ github.event.inputs.reuse_run_id }}
           github-token: ${{ github.event.inputs.reuse_run_id != '' && github.token || '' }}
 
-      - name: Locate the binaries
+      - name: Install the bundle where uiAccess can be granted
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = Get-ChildItem stage -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
-          if (-not $exe) { throw "the downloaded bundle has no KeePassXC.exe" }
-          "KPXC_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
-          "KPXC_CLI=$(Join-Path $exe.DirectoryName 'keepassxc-cli.exe')" >> $env:GITHUB_ENV
+          $staged = Get-ChildItem stage -Recurse -Filter 'KeePassXC.exe' | Select-Object -First 1
+          if (-not $staged) { throw "the downloaded bundle has no KeePassXC.exe" }
+
+          # Under %ProgramFiles%, not in the workspace. Windows grants uiAccess
+          # only to a binary a standard user cannot overwrite, and the injector
+          # looks for the helper beside the application and nowhere else -- so
+          # the application directory is what has to be the protected one. This
+          # is also the layout a real install has.
+          $dst = Join-Path $env:ProgramFiles 'KeePassXC-evidence'
+          Remove-Item $dst -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item (Join-Path $staged.DirectoryName '*') $dst -Recurse -Force
+
+          $exe = Join-Path $dst 'KeePassXC.exe'
+          "KPXC_EXE=$exe" >> $env:GITHUB_ENV
+          "KPXC_CLI=$(Join-Path $dst 'keepassxc-cli.exe')" >> $env:GITHUB_ENV
+          $helper = Join-Path $dst 'keepassxc-uiaccess-helper.exe'
+          if (-not (Test-Path $helper)) {
+            throw "the bundle has no keepassxc-uiaccess-helper.exe beside KeePassXC.exe"
+          }
+          "KPXC_HELPER=$helper" >> $env:GITHUB_ENV
 
           # The claim this job makes about which build it is measuring, re-checked
           # after the artifact round trip rather than inherited from the build job.
-          $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
           $patched = [System.Text.Encoding]::Unicode.GetString($bytes).Contains('keepassxc-uiaccess-')
           Write-Host "variant=${{ matrix.variant }} binary_contains_patch=$patched"
           if ($patched -ne ('${{ matrix.variant }}' -eq 'patched')) {
             throw "the downloaded ${{ matrix.variant }} bundle does not match its label"
           }
 
-      - name: Build, sign and install the uiAccess helper
+      - name: Sign the application and the uiAccess helper
         shell: pwsh
-        working-directory: src/autotype/windows/uiaccess-helper
         run: |
           $ErrorActionPreference = 'Stop'
-          # Installed for both variants: the helper is not the thing under test,
-          # and leaving it out would make "the control has no helper" an
-          # alternative explanation for the control's failure.
-          cmd /c "build.bat x64"
-          if ($LASTEXITCODE -ne 0) { throw "build.bat failed with $LASTEXITCODE" }
-
-          $dst = Join-Path $env:ProgramFiles 'keepassxc-uiaccess'
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          $exe = Join-Path $dst 'typehelper.exe'
-          Copy-Item typehelper.exe $exe -Force
-
-          # A throwaway certificate, trusted for this run only: uiAccess cares
-          # that the chain is trusted on this machine and that the file sits
-          # where a standard user cannot write, not who signed it.
+          # Both, with one certificate. The helper needs a signature because
+          # Windows will not grant uiAccess without one; KeePassXC.exe needs the
+          # *same* one because the helper refuses to serve a pipe whose server is
+          # not signed by the certificate that signed the helper -- which is what
+          # a release has, and what stops any other process on the machine from
+          # starting the helper and pointing it somewhere else.
+          #
+          # Both variants are signed: keeping "the control had no helper" from
+          # being an alternative explanation for the control's failure.
           $cert = New-SelfSignedCertificate -Subject "CN=keepassxc uiaccess evidence" `
             -Type CodeSigningCert -CertStoreLocation Cert:\LocalMachine\My `
             -NotAfter (Get-Date).AddMonths(1)
@@ -310,10 +369,12 @@ jobs:
             $s = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, 'LocalMachine')
             $s.Open('ReadWrite'); $s.Add($cert); $s.Close()
           }
-          Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256 | Out-Null
-          $sig = Get-AuthenticodeSignature $exe
-          Write-Host "helper signature: $($sig.Status)"
-          if ($sig.Status -ne 'Valid') { throw "the helper is not validly signed" }
+          foreach ($exe in @($env:KPXC_HELPER, $env:KPXC_EXE)) {
+            Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256 | Out-Null
+            $sig = Get-AuthenticodeSignature $exe
+            Write-Host "$([System.IO.Path]::GetFileName($exe)) signature: $($sig.Status)"
+            if ($sig.Status -ne 'Valid') { throw "$exe is not validly signed" }
+          }
 
       - name: Create the test database
         shell: pwsh
@@ -377,6 +438,12 @@ jobs:
             ''
             '[GUI]'
             'CheckForUpdates=false'
+            ''
+            # Delegation is opt-in and off by default, so without this the
+            # patched leg behaves like the control and the run proves nothing.
+            # Set for both variants: the control has no code that reads it.
+            '[Security]'
+            'AutoTypeCredentialPrompts=true'
           # Security/AutotypeAsk is deliberately left at its default. Switching
           # the confirmation dialog off looked like a simplification and was a
           # regression: the dialog is what gives the credential prompt time to
@@ -387,8 +454,13 @@ jobs:
           Write-Host "wrote $ini"
           Get-Content $ini | Write-Host
 
-      - name: Run the harness at medium integrity
+      - name: Run the harness
         shell: pwsh
+        # Bounded, because a hung step takes the evidence with it: the upload
+        # runs after this one, and force-cancelling a run that is stuck skips
+        # it, so a round that hangs produces no recording, no timeline and no
+        # log to say where it stopped. The harness takes 2-3 minutes.
+        timeout-minutes: 12
         run: |
           $artifacts = Join-Path $env:GITHUB_WORKSPACE 'evidence-artifacts'
           New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
@@ -407,11 +479,14 @@ jobs:
           $result = Join-Path $env:RUNNER_TEMP 'credui_result.txt'
           Remove-Item $result -ErrorAction SilentlyContinue
 
-          # Arguments, not environment variables: run_at_medium_integrity.py
-          # builds the child's environment block from the user token, so
-          # anything exported by this step would not arrive.
-          python tests/ui-credui/run_at_medium_integrity.py `
-            python tests/ui-credui/verify_with_wintegrate.py `
+          # This step is not de-elevated. KeePassXC is what has to be at medium
+          # integrity -- at high integrity the credential prompt accepts injected
+          # input with or without the patch -- and the harness starts it that way
+          # itself. Dropping the harness too measured the same thing and cost it
+          # the ability to clean up: its own kills came back "Access is denied",
+          # so KeePassXC outlived every case and each one ran under the settings
+          # of the one before.
+          python tests/ui-credui/verify_with_wintegrate.py `
             --exe $env:KPXC_EXE `
             --db $env:KPXC_DB `
             --password $env:DB_PASSWORD `
@@ -459,13 +534,26 @@ jobs:
           $helperStarted = (Test-Path $watch) -and
             ((Get-Content $watch | Where-Object { $_ -match 'started pid=' }).Count -gt 0)
 
+          $promptIntegrity = ($log | Where-Object { $_.type -eq 'prompt' } |
+                              Select-Object -Last 1).integrity
+
           Write-Host "keepassxc integrity : $integrity"
+          Write-Host "prompt integrity    : $promptIntegrity"
           Write-Host "helper started      : $helperStarted"
           Write-Host "prompt submitted    : $($outcome.submitted)"
           Write-Host "foreground stolen   : $stolen time(s) during the sequence"
 
           if ($integrity -notlike 'Medium*') {
             throw "KeePassXC ran at '$integrity'; at High integrity the prompt accepts input with or without the patch"
+          }
+
+          # The prompt's integrity follows whatever raised it, and it is half of
+          # the comparison: the point is a window a medium process cannot reach.
+          # It went unwatched and drifted to High the moment the harness stopped
+          # being de-elevated, which changed what the run measured without
+          # changing what it reported.
+          if ($promptIntegrity -like 'High*') {
+            throw "the credential prompt ran at '$promptIntegrity'; it is supposed to be the window a medium process cannot reach, so whatever raised it was not medium either"
           }
 
           $isPatched = '${{ matrix.variant }}' -eq 'patched'
@@ -489,6 +577,42 @@ jobs:
             }
             Write-Host "::warning::the sequence was interrupted $stolen time(s) by another window taking the foreground, so end-to-end submission was not measurable on this runner; the delegation itself is asserted above"
           }
+
+      # Only against the patched variant: the control has no code that could
+      # refuse anything, so running it there would assert nothing.
+      - name: Check what the patch refuses
+        if: matrix.variant == 'patched'
+        shell: pwsh
+        # Four cases at roughly the cost of the run above, and the same reason
+        # to bound it.
+        timeout-minutes: 25
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifacts = Join-Path $env:GITHUB_WORKSPACE 'evidence-artifacts\refusals'
+          New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+          $report = Join-Path $artifacts 'refusals.json'
+
+          python tests/ui-credui/verify_refusals.py `
+            --exe $env:KPXC_EXE `
+            --db $env:KPXC_DB `
+            --password $env:DB_PASSWORD `
+            --entry $env:ENTRY_TITLE `
+            --username $env:ENTRY_USERNAME `
+            --result (Join-Path $env:RUNNER_TEMP 'refusal_result.txt') `
+            --artifacts $artifacts `
+            --report $report `
+            --dwell 1.0
+          $exit = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
+          if (Test-Path $report) { Get-Content $report | Write-Host }
+          if ($exit -ne 0) { throw "a refusal did not hold; see refusals.json" }
+
+          # The installed bundle must be exactly as it was: the writable-location
+          # case copies it elsewhere rather than touching this one, and a
+          # half-restored bundle would make every later run look like a refusal.
+          $signed = Get-AuthenticodeSignature $env:KPXC_HELPER
+          Write-Host "helper signature after the refusal cases: $($signed.Status)"
+          if ($signed.Status -ne 'Valid') { throw "the installed helper was modified" }
 
       - name: Upload the recording and the timeline
         if: always()
