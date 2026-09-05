@@ -1,0 +1,78 @@
+# Does the #12956 patch change anything for everyone else?
+#
+# The patch adds two virtuals with default no-op bodies and moves three
+# ::SendInput calls behind one wrapper. That argument is structural, and this
+# runs the existing suite against it anyway -- on Linux, where every line the
+# patch adds is either absent or a no-op, so a failure here is a failure of the
+# unchanged path.
+#
+# testautotype is the one that matters: it drives executeAutoTypeActions()
+# through AutoTypePlatformTest, which does not override the new hooks, so it
+# exercises exactly the case where delegation must not happen.
+name: "Regression check (existing tests, patched vs develop)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same suite on the branch and on its base. A test that was already
+        # failing on develop would otherwise read as a regression.
+        variant: [patched, baseline]
+    name: "tests ${{ matrix.variant }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out develop for the baseline
+        if: matrix.variant == 'baseline'
+        run: git checkout origin/develop
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          # Qt6 and Botan 2: develop's find_package(Qt6 ... REQUIRED) rules out
+          # the Qt5 list in copilot-setup-steps.yml, and noble carries botan
+          # 2.19.3, which clears the project's 2.19.1 minimum -- libbotan-3-dev
+          # does not exist there. Both were found by trying, one per run.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake g++ ninja-build \
+            qt6-base-dev qt6-base-private-dev qt6-svg-dev libqt6svg6-dev \
+            qt6-tools-dev qt6-tools-dev-tools qt6-l10n-tools \
+            libargon2-dev libkeyutils-dev libminizip-dev libbotan-2-dev \
+            libqrencode-dev zlib1g-dev libreadline-dev libpcsclite-dev \
+            libusb-1.0-0-dev libxi-dev libxtst-dev xvfb
+
+      - name: Configure and build the tests
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DWITH_TESTS=ON \
+            -DKPXC_FEATURE_DOCS=OFF
+          # Target names taken from tests/CMakeLists.txt; WITH_XC_AUTOTYPE is not
+          # a variable this project has, and cmake only warns about that.
+          cmake --build build --parallel --target testautotype testentry testgroup testdatabase testmerge
+
+      - name: Run them
+        working-directory: build
+        run: |
+          set -euo pipefail
+          # Xvfb because the Auto-Type test needs a display; without one the
+          # suite aborts before running and the job would still look green if
+          # the exit code were not checked.
+          # Anchored, because ctest -R is a substring match: "testentry" also
+          # selects testentrymodel and testentrysearcher, which this job does
+          # not build, and a Not Run test fails the whole ctest invocation.
+          xvfb-run -a ctest --output-on-failure \
+            -R "^(testautotype|testentry|testgroup|testdatabase|testmerge)$"
