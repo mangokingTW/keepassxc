@@ -72,7 +72,7 @@ public:
     }
 
 private:
-    void drainPipe();
+    bool drainPipe();
     /** Waits for the helper to connect. Never blocks indefinitely. */
     bool waitForHelper();
 
