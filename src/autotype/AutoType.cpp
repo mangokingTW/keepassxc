@@ -356,7 +356,12 @@ void AutoType::executeAutoTypeActions(const Entry* entry,
         // box and pumps events, so it can be left through a nested event loop or a
         // quit, and a platform that started something privileged for this sequence
         // must not have it outlive the function.
-        const QScopeGuard endSequence = qScopeGuard([this] { m_platform->endSequence(); });
+        bool ended = false;
+        const QScopeGuard endSequence = qScopeGuard([this, &ended] {
+            if (!ended) {
+                m_platform->endSequence();
+            }
+        });
 
         for (const auto& action : asConst(actions)) {
             // Cancel Auto-Type if the active window changed
@@ -392,6 +397,14 @@ void AutoType::executeAutoTypeActions(const Entry* entry,
             if (failed) {
                 break;
             }
+        }
+
+        // The ordinary ending, explicit so its result can be shown: the guard
+        // above covers the exits that skip this.
+        ended = true;
+        const auto endResult = m_platform->endSequence();
+        if (!endResult.isOk() && getMainWindow()) {
+            MessageBox::critical(getMainWindow(), tr("Auto-Type Error"), endResult.errorString());
         }
     }
 

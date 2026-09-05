@@ -253,6 +253,14 @@ static int target_is_credential_dialog(HWND window)
     if (_snwprintf_s(expected + length, MAX_PATH - length, _TRUNCATE, L"\\System32\\CredentialUIBroker.exe") < 0) {
         return 0;
     }
+    /* This runs before every batch. When the two names are already the same
+     * text there is nothing a file-identity comparison could add, and it saves
+     * two CreateFileW per batch -- the case worth having on a machine whose
+     * filter drivers make every open slow. Names that differ (8.3, a junction,
+     * a mapped drive) still go through same_file. */
+    if (_wcsicmp(image, expected) == 0) {
+        return 1;
+    }
     if (!same_file(image, expected)) {
         return 0;
     }

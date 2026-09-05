@@ -51,8 +51,13 @@ public:
     {
         Q_UNUSED(window);
     }
-    virtual void endSequence()
+    // Returns what only the teardown can know: a platform that delegated the
+    // sequence learns whether its last batch arrived after the last action has
+    // already reported success, and this is where that becomes an error the
+    // user sees rather than a warning in the log.
+    virtual AutoTypeAction::Result endSequence()
     {
+        return AutoTypeAction::Result::Ok();
     }
 
     virtual AutoTypeExecutor& executor() const = 0;

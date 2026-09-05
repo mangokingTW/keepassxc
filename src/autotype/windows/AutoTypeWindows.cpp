@@ -123,13 +123,23 @@ void AutoTypePlatformWin::beginSequence(WId window)
     }
 }
 
-void AutoTypePlatformWin::endSequence()
+AutoTypeAction::Result AutoTypePlatformWin::endSequence()
 {
     const bool interrupted = m_delegating && m_delegationFailed;
+    const bool delegated = m_delegating;
     m_delegating = false;
     m_delegationFailed = false;
+    auto result = AutoTypeAction::Result::Ok();
     if (m_injector) {
         m_injector->end();
+        // A failure the helper could only report on exit -- its last batch
+        // dropped after the last action had returned Ok -- is still a failed
+        // sequence. Reported here, once, and not when the loop already stopped
+        // on it (that case has shown its message).
+        if (delegated && !interrupted && m_injector->helperFailed()) {
+            result = AutoTypeAction::Result::Failed(
+                QObject::tr("Auto-Type was interrupted: the privileged helper did not deliver all keystrokes"));
+        }
         // The helper releases the modifiers it may have left held on every
         // abort of its own, but not when it had to be terminated or had already
         // died -- which is exactly the case being handled here. A modifier
@@ -138,11 +148,12 @@ void AutoTypePlatformWin::endSequence()
         // while the credential prompt still holds the foreground, UIPI drops
         // these key-ups, and they land once the prompt is gone.
         if (interrupted || m_injector->helperFailed()) {
-            for (const auto key : {Qt::Key_Shift, Qt::Key_Control, Qt::Key_Alt, Qt::Key_Meta}) {
+            for (const auto key : {Qt::Key_Shift, Qt::Key_Control, Qt::Key_Alt, Qt::Key_AltGr, Qt::Key_Meta}) {
                 setKeyState(key, false);
             }
         }
     }
+    return result;
 }
 
 //

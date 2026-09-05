@@ -47,7 +47,7 @@ public:
     bool raiseWindow(WId window) override;
     // Decided here rather than in raiseWindow; see AutoTypePlatform.h.
     void beginSequence(WId window) override;
-    void endSequence() override;
+    AutoTypeAction::Result endSequence() override;
     AutoTypeExecutor& executor() const override;
 
     void sendCharVirtual(const QChar& ch);
