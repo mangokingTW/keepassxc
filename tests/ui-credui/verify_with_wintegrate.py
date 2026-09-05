@@ -169,6 +169,16 @@ class ForegroundTrace:
                     round(time.monotonic() - start, 2), hwnd,
                     w.get_window_class(hwnd) or "", (w.get_window_title(hwnd) or "")[:40],
                 ))
+            # Once the held window is gone -- hidden on submission, destroyed when
+            # its host exits -- there is nothing to hold: record it once and stop.
+            if self.hold:
+                held = wintypes.HWND(self.hold)
+                if not user32.IsWindow(held):
+                    self.samples.append((round(time.monotonic() - start, 2), 0, "", "held window destroyed"))
+                    self.hold = None
+                elif not user32.IsWindowVisible(held):
+                    self.samples.append((round(time.monotonic() - start, 2), 0, "", "held window hidden"))
+                    self.hold = None
             # No foreground window is not an intervention: nothing took it.
             if self.hold and hwnd and hwnd != self.hold:
                 self.interventions.append({
@@ -176,30 +186,16 @@ class ForegroundTrace:
                     "class": w.get_window_class(hwnd) or "",
                     "title": (w.get_window_title(hwnd) or "")[:40],
                 })
-                # Re-assert the target instead of pushing the intruder down.
-                # Hiding or minimising other people's windows turned into a
-                # fight -- 285 interventions in one sequence against a terminal
-                # its owner kept re-activating -- and it is not what the rest of
-                # this suite does: nothing else depends on the Z-order, only on
-                # its own window being in front.
-                #
-                # Through wintegrate rather than a bare SetForegroundWindow:
-                # that call is refused across processes unless the caller
-                # already owns the foreground, and it fails silently, so the
-                # trace would have shown interventions that did nothing.
+                # Re-assert the target rather than pushing the intruder down; via
+                # wintegrate, because a bare SetForegroundWindow across processes
+                # fails silently.
                 try:
                     w.Window(self.hold).set_foreground()
                 except Exception as exc:  # noqa: BLE001 - a diagnostic thread
                     self.interventions[-1]["set_foreground_failed"] = f"{type(exc).__name__}"
 
-                # One window on a hosted runner does not give the foreground
-                # back: measured, the agent's terminal took it at t=4.55 and
-                # sixteen set_foreground calls over the next twenty seconds
-                # never won it back, while minimising it only had its owner
-                # re-activate it. It is hidden for the rest of the sequence and
-                # shown again afterwards -- targeted at that one class rather
-                # than at the desktop, because everything else here is either
-                # the target or harmless.
+                # A terminal host re-activates itself when minimised: hide it for
+                # the sequence and show it again afterwards.
                 if w.get_window_class(hwnd) in PERSISTENT_FOREGROUND_CLASSES:
                     user32.ShowWindow(wintypes.HWND(hwnd), SW_HIDE)
                     self.hidden.add(hwnd)

@@ -32,3 +32,4 @@ out/
 # vcpkg
 vcpkg_installed*/
 
+__pycache__/
