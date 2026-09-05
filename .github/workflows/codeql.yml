@@ -6,6 +6,10 @@ on:
       - 'develop'
       - 'release/**'
   pull_request:
+    # The evidence branch is stacked on the product branch; CodeQL belongs to the product PR.
+    branches:
+      - 'develop'
+      - 'release/**'
   schedule:
     - cron: '5 16 * * 3'
 
