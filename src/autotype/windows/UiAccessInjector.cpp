@@ -458,6 +458,9 @@ void UiAccessInjector::end()
     // endSequence() release modifiers after every later sequence into any
     // window -- synthetic key-ups the user did not ask for.
     m_helperFailed = false;
+    // Whether the helper had read everything before the pipe was disconnected;
+    // read below, after the exit code, so it is declared here.
+    bool drained = true;
     if (m_pipe != INVALID_HANDLE_VALUE) {
         // Disconnecting discards what the helper has not read yet, and the
         // helper reads on a 25 ms poll, so the last batch of a sequence --
@@ -465,7 +468,6 @@ void UiAccessInjector::end()
         // exited 0. Wait for it to drain first, but only while the helper is
         // alive to drain it: a dead helper has already broken the pipe, and
         // a live one takes at most one poll interval. Bounded either way.
-        bool drained = true;
         if (m_process && ::WaitForSingleObject(m_process, 0) == WAIT_TIMEOUT) {
             drained = drainPipe();
             if (!drained) {
