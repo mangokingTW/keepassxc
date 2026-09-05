@@ -54,7 +54,7 @@ env:
   # with it, which is why the step came back cancelled rather than failed.
   # 0.5.13 tried to spare it and asked the wrong question; 0.5.14 asks
   # GetConsoleProcessList, which answers for a windowless ConPTY.
-  WINTEGRATE_VERSION: ">=0.5.15"
+  WINTEGRATE_VERSION: ">=0.6.1"
 
 jobs:
   build:
