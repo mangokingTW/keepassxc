@@ -130,13 +130,15 @@ void AutoTypePlatformWin::endSequence()
     m_delegationFailed = false;
     if (m_injector) {
         m_injector->end();
-        // The helper releases the modifiers it may have left held, but not when
-        // it had to be terminated or had already died -- which is exactly the
-        // case being handled here. A modifier injected by the helper is global
-        // state, so this side clears it too; the keys are the ones execType
-        // presses, and never the Windows key.
+        // The helper releases the modifiers it may have left held on every
+        // abort of its own, but not when it had to be terminated or had already
+        // died -- which is exactly the case being handled here. A modifier
+        // injected by the helper is global state, so this side clears it too:
+        // the keys execType presses, the Windows key among them. Best effort:
+        // while the credential prompt still holds the foreground, UIPI drops
+        // these key-ups, and they land once the prompt is gone.
         if (interrupted || m_injector->helperFailed()) {
-            for (const auto key : {Qt::Key_Shift, Qt::Key_Control, Qt::Key_Alt}) {
+            for (const auto key : {Qt::Key_Shift, Qt::Key_Control, Qt::Key_Alt, Qt::Key_Meta}) {
                 setKeyState(key, false);
             }
         }

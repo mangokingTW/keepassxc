@@ -39,6 +39,11 @@
  * Usage: keepassxc-uiaccess-helper.exe --pipe <name> --target <hwnd>
  */
 
+/* FILE_ID_INFO / FileIdInfo need the Windows 8 SDK surface; the compiler's
+ * default may be older. */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
 #include <windows.h>
 
 #include <shellapi.h>
@@ -51,7 +56,11 @@
 
 /* Long enough for the pauses in a sequence, short enough that a caller which
  * hangs while holding the pipe open does not leave this process running. */
-#define MAX_IDLE_MS 60000
+/* A backstop, not the way a sequence ends: the pipe breaking is. It exists so a
+ * process with a UIPI exemption does not outlive a caller that hung holding
+ * the handle. Ten minutes rather than one, because a legal sequence can idle
+ * longer than that -- {DELAY} is capped at 10 s per token but not in count. */
+#define MAX_IDLE_MS 600000
 #define POLL_MS 25
 
 /* Nothing is injected into a window other than the one named at startup. */
@@ -120,32 +129,53 @@ static int image_path_of(DWORD pid, wchar_t* out, DWORD chars)
  * junction or a mapped drive all give a second name for the same bytes, and the
  * kernel hands back its own canonical form rather than the one the process was
  * launched with. Volume plus file index identifies the file itself. */
+static HANDLE open_for_identity(const wchar_t* path)
+{
+    /* FILE_SHARE_DELETE too: a scanner or an update holding the broker's image
+     * with delete sharing would otherwise make this open fail, and a failed
+     * open reads as "not the same file" -- a genuine dialog refused. */
+    return CreateFileW(path,
+                       0,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL,
+                       OPEN_EXISTING,
+                       FILE_FLAG_BACKUP_SEMANTICS,
+                       NULL);
+}
+
 static int same_file(const wchar_t* left, const wchar_t* right)
 {
-    BY_HANDLE_FILE_INFORMATION a;
-    BY_HANDLE_FILE_INFORMATION b;
-    HANDLE first =
-        CreateFileW(left, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    HANDLE first = open_for_identity(left);
     if (first == INVALID_HANDLE_VALUE) {
         return 0;
     }
-    HANDLE second = CreateFileW(
-        right, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    HANDLE second = open_for_identity(right);
     if (second == INVALID_HANDLE_VALUE) {
         CloseHandle(first);
         return 0;
     }
-    const int ok = GetFileInformationByHandle(first, &a) && GetFileInformationByHandle(second, &b)
-                   && a.dwVolumeSerialNumber == b.dwVolumeSerialNumber && a.nFileIndexHigh == b.nFileIndexHigh
-                   && a.nFileIndexLow == b.nFileIndexLow;
+    int ok = 0;
+    /* The 128-bit identity first: NTFS has 64-bit file ids, ReFS (a Dev Drive
+     * is one) has 128-bit ones and reports a truncated or zero 64-bit view.
+     * Where the volume does not support the query, the 64-bit view is exact. */
+    FILE_ID_INFO ia;
+    FILE_ID_INFO ib;
+    if (GetFileInformationByHandleEx(first, FileIdInfo, &ia, sizeof(ia))
+        && GetFileInformationByHandleEx(second, FileIdInfo, &ib, sizeof(ib))) {
+        ok = ia.VolumeSerialNumber == ib.VolumeSerialNumber
+             && memcmp(&ia.FileId, &ib.FileId, sizeof(ia.FileId)) == 0;
+    } else {
+        BY_HANDLE_FILE_INFORMATION a;
+        BY_HANDLE_FILE_INFORMATION b;
+        ok = GetFileInformationByHandle(first, &a) && GetFileInformationByHandle(second, &b)
+             && a.dwVolumeSerialNumber == b.dwVolumeSerialNumber && a.nFileIndexHigh == b.nFileIndexHigh
+             && a.nFileIndexLow == b.nFileIndexLow;
+    }
     CloseHandle(second);
     CloseHandle(first);
     return ok;
 }
 
-/* The application this helper belongs to, and only that one: the binary is on
- * disk and ShellExecute starts it, so without this any process running as this
- * user could point it wherever it liked. */
 static int server_is_our_application(HANDLE pipe)
 {
     DWORD server_pid = 0;
@@ -259,7 +289,24 @@ static int pipe_mode(const wchar_t* name)
         return 4;
     }
 
-    HANDLE pipe = CreateFileW(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    /* SECURITY_ANONYMOUS: the server never gets to impersonate this process.
+     * Without it a server that is not our application -- checked only after
+     * the connection is up -- could ImpersonateNamedPipeClient and hold this
+     * process's uiAccess token for as long as the impersonation lasts.
+     *
+     * Retried briefly on ERROR_PIPE_BUSY: the server has one instance, and
+     * anything in the session that connects first is dropped by the server
+     * and disconnected -- but a single failed open here would have already
+     * ended this process, so one stray client could disable the feature. */
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        pipe = CreateFileW(
+            path, GENERIC_READ, 0, NULL, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS, NULL);
+        if (pipe != INVALID_HANDLE_VALUE || GetLastError() != ERROR_PIPE_BUSY) {
+            break;
+        }
+        WaitNamedPipeW(path, 50);
+    }
     if (pipe == INVALID_HANDLE_VALUE) {
         report("keepassxc-uiaccess-helper: pipe open failed: %lu\n", GetLastError());
         return 4;
@@ -285,8 +332,15 @@ static int pipe_mode(const wchar_t* name)
             break;
         }
         if (count > MAX_BATCH) {
+            /* Every abort below returns non-zero. The caller reads the exit
+             * code after the pipe closes, and it is the only channel that can
+             * still say "the last batch did not go in": a batch dropped at the
+             * end is never followed by a write that could fail. A zero here
+             * ended a truncated sequence looking like a completed one. */
             report("keepassxc-uiaccess-helper: refusing a batch of %lu records\n", count);
-            break;
+            release_modifiers();
+            CloseHandle(pipe);
+            return 7;
         }
 
         /* Nothing is consumed until the whole message is here. Reading the
@@ -296,12 +350,16 @@ static int pipe_mode(const wchar_t* name)
         const DWORD wanted = count * (DWORD)sizeof(INPUT);
         if (available >= sizeof(count) && count == 0) {
             report("keepassxc-uiaccess-helper: refusing a batch of 0 records\n");
-            break;
+            release_modifiers();
+            CloseHandle(pipe);
+            return 7;
         }
         if (available < sizeof(count) || available < sizeof(count) + wanted) {
             if (idle >= MAX_IDLE_MS) {
                 report("keepassxc-uiaccess-helper: idle for %lums, exiting\n", idle);
-                break;
+                release_modifiers();
+                CloseHandle(pipe);
+                return 8;
             }
             Sleep(POLL_MS);
             idle += POLL_MS;
@@ -340,7 +398,8 @@ static int pipe_mode(const wchar_t* name)
             report("keepassxc-uiaccess-helper: target lost the foreground, aborting the sequence\n");
             SecureZeroMemory(batch, wanted);
             release_modifiers();
-            break;
+            CloseHandle(pipe);
+            return 9;
         }
 
         const UINT sent = SendInput(count, batch, sizeof(INPUT));
@@ -352,7 +411,8 @@ static int pipe_mode(const wchar_t* name)
              * see it, and the rest of the sequence still arrives. */
             report("keepassxc-uiaccess-helper: SendInput queued %u of %lu: %lu\n", sent, count, GetLastError());
             release_modifiers();
-            break;
+            CloseHandle(pipe);
+            return 10;
         }
     }
 

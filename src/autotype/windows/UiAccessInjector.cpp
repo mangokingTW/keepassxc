@@ -260,7 +260,10 @@ bool UiAccessInjector::begin(HWND target)
     // one it is about to type into.
     info.nShow = SW_HIDE;
 
-    if (!::ShellExecuteExW(&info)) {
+    // hProcess can be null with the call reporting success (a shell that
+    // delegated the launch). Without it there is no pid to admit at the pipe
+    // and no exit code to read, so it is a failed launch, not a slow one.
+    if (!::ShellExecuteExW(&info) || !info.hProcess) {
         end();
         return false;
     }
@@ -324,8 +327,10 @@ bool UiAccessInjector::waitForHelper()
 
     // Left non-blocking on purpose. This all runs on the thread executing the
     // Auto-Type sequence, and a synchronous WriteFile to a helper that has
-    // stopped draining the pipe would stop the application with it. A short
-    // write is treated as a failed send instead.
+    // stopped draining the pipe would stop the application with it. A write
+    // the buffer cannot take is retried for a bounded time in send() -- the
+    // buffer holds exactly one message and the helper polls every 25 ms --
+    // and only then treated as a failed send.
     return true;
 }
 
@@ -350,14 +355,33 @@ bool UiAccessInjector::send(const INPUT* inputs, int count)
     ::memcpy(message + sizeof(records), inputs, bytes);
     const DWORD size = static_cast<DWORD>(sizeof(records) + bytes);
 
-    DWORD written = 0;
-    const bool sent = ::WriteFile(m_pipe, message, size, &written, nullptr) && written == size;
+    // On a non-blocking pipe a full buffer does not wait: WriteFile fails with
+    // ERROR_NO_DATA, or writes nothing, until the helper has read the previous
+    // message. It polls every 25 ms, so at a low AutoTypeDelay the buffer is
+    // often still full when the next batch arrives. Retried, bounded, so that
+    // is a pause rather than a truncated password; a helper that has really
+    // stopped reading still fails the send, after s_sendRetryMs.
+    bool sent = false;
+    const ULONGLONG deadline = ::GetTickCount64() + s_sendRetryMs;
+    for (;;) {
+        DWORD written = 0;
+        const bool ok = ::WriteFile(m_pipe, message, size, &written, nullptr);
+        if (ok && written == size) {
+            sent = true;
+            break;
+        }
+        // A partial write cannot be completed with the rest: the helper reads
+        // whole messages. Anything but "try again" is final.
+        const DWORD error = ::GetLastError();
+        if ((ok && written != 0) || (!ok && error != ERROR_NO_DATA) || ::GetTickCount64() >= deadline) {
+            break;
+        }
+        ::Sleep(5);
+    }
     // The buffer held a password.
     ::SecureZeroMemory(message, sizeof(message));
     if (!sent) {
-        // On a non-blocking pipe a full buffer reports a short write rather
-        // than waiting: the helper is not keeping up, and the caller's
-        // all-or-nothing rule takes it from here.
+        // The caller's all-or-nothing rule takes it from here.
         end();
         return false;
     }
@@ -366,7 +390,30 @@ bool UiAccessInjector::send(const INPUT* inputs, int count)
 
 void UiAccessInjector::end()
 {
+    // Fresh each time: it describes the helper this call ends, and stays false
+    // when there was none. Left over from an earlier failure it would have
+    // endSequence() release modifiers after every later sequence into any
+    // window -- synthetic key-ups the user did not ask for.
+    m_helperFailed = false;
     if (m_pipe != INVALID_HANDLE_VALUE) {
+        // Disconnecting discards what the helper has not read yet, and the
+        // helper reads on a 25 ms poll, so the last batch of a sequence --
+        // typically the Enter -- was being thrown away while the helper
+        // exited 0. Wait for it to drain first, but only while the helper is
+        // alive to drain it: a dead helper has already broken the pipe, and
+        // a live one takes at most one poll interval. Bounded either way.
+        if (m_process) {
+            const ULONGLONG deadline = ::GetTickCount64() + s_drainTimeoutMs;
+            while (::GetTickCount64() < deadline && ::WaitForSingleObject(m_process, 0) == WAIT_TIMEOUT) {
+                DWORD mode = PIPE_TYPE_BYTE | PIPE_WAIT;
+                // In blocking mode FlushFileBuffers returns once the client has
+                // read everything, or fails once the pipe is broken.
+                if (::SetNamedPipeHandleState(m_pipe, &mode, nullptr, nullptr) && ::FlushFileBuffers(m_pipe)) {
+                    break;
+                }
+                ::Sleep(5);
+            }
+        }
         ::DisconnectNamedPipe(m_pipe);
         ::CloseHandle(m_pipe);
         m_pipe = INVALID_HANDLE_VALUE;

@@ -78,6 +78,8 @@ private:
     static constexpr int s_helperConnectTimeoutMs = 3000;
     static constexpr int s_helperConnectPollMs = 50;
     static constexpr int s_helperExitTimeoutMs = 2000;
+    static constexpr int s_sendRetryMs = 500;
+    static constexpr int s_drainTimeoutMs = 500;
 
     bool m_helperFailed = false;
     HANDLE m_pipe = INVALID_HANDLE_VALUE;
