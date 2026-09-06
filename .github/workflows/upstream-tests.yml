@@ -59,7 +59,7 @@ jobs:
             libqt6svg6-dev libgl1-mesa-dev \
             libargon2-dev libkeyutils-dev libminizip-dev libbotan-2-dev libqrencode-dev zlib1g-dev \
             libreadline-dev libpcsclite-dev libusb-1.0-0-dev \
-            libx11-dev libxi-dev libxtst-dev libxkbcommon-dev xvfb
+            libx11-dev libxi-dev libxtst-dev libxkbcommon-dev xvfb xclip xsel
 
       - name: Configure and build (Linux)
         if: runner.os == 'Linux'
