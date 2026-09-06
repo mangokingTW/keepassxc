@@ -76,13 +76,17 @@ def launch(path: str) -> dict:
 
 
 def ps(expr: str) -> str:
-    # Explicit import: under a pwsh step the runner's PSModulePath points Windows
-    # PowerShell at modules it cannot load, and autoloading the Security module fails.
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", f"Import-Module Microsoft.PowerShell.Security; {expr}"],
-        capture_output=True, text=True, env={k: v for k, v in os.environ.items() if k != "PSModulePath"},
-    )
-    return (out.stdout or out.stderr).strip().splitlines()[0] if (out.stdout or out.stderr).strip() else "?"
+    """PowerShell 7 first: Windows PowerShell started from inside a pwsh step cannot
+    load its Security module (the runner rewrites PSModulePath)."""
+    for shell in ("pwsh", "powershell"):
+        try:
+            out = subprocess.run([shell, "-NoProfile", "-Command", expr], capture_output=True, text=True, timeout=60)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        text = (out.stdout or "").strip()
+        if out.returncode == 0 and text:
+            return text.splitlines()[0]
+    return "?"
 
 
 def policy(name: str):
