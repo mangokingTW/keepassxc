@@ -81,6 +81,56 @@ SHELL_CLASSES = frozenset({"Shell_TrayWnd", "Progman", "WorkerW", "Shell_Seconda
 # Windows whose owner puts them back in the foreground no matter how often they
 # are asked not to. On a GitHub hosted runner this is the agent's own terminal.
 PERSISTENT_FOREGROUND_CLASSES = frozenset({"CASCADIA_HOSTING_WINDOW_CLASS"})
+
+
+# The cursor as the recording draws it: GetCursorInfo's handle, named against the
+# standard cursors. A busy ring over the prompt's text field in some runner
+# recordings (never on the VM) is either a field whose thread stopped answering
+# WM_SETCURSOR, or a stale shape nobody re-asked for because the mouse never
+# moved again. IsHungAppWindow separates the two, and a one-pixel nudge at +5 s
+# does the re-asking.
+class _CURSORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("hCursor", wintypes.HANDLE), ("ptScreenPos", wintypes.POINT)]
+
+
+_STANDARD_CURSORS = {32512: "arrow", 32513: "ibeam", 32514: "wait", 32649: "hand", 32650: "appstarting"}
+_CURSOR_NAMES: dict[int, str] = {}
+
+
+def _cursor_probe(prompt_hwnd: int | None) -> dict:
+    if not _CURSOR_NAMES:
+        for rid, name in _STANDARD_CURSORS.items():
+            handle = user32.LoadCursorW(None, ctypes.c_wchar_p(rid))
+            if handle:
+                _CURSOR_NAMES[int(handle)] = name
+    info = _CURSORINFO(); info.cbSize = ctypes.sizeof(_CURSORINFO)
+    out: dict = {}
+    if user32.GetCursorInfo(ctypes.byref(info)):
+        handle = int(info.hCursor or 0)
+        out["cursor"] = _CURSOR_NAMES.get(handle, f"other:{handle:#x}") if info.flags else "hidden"
+        under = user32.WindowFromPoint(info.ptScreenPos)
+        out["under"] = w.get_window_class(under) or "" if under else ""
+        out["under_hung"] = bool(user32.IsHungAppWindow(wintypes.HWND(under))) if under else None
+    if prompt_hwnd and user32.IsWindow(wintypes.HWND(prompt_hwnd)):
+        out["prompt_hung"] = bool(user32.IsHungAppWindow(wintypes.HWND(prompt_hwnd)))
+    return out
+
+
+def _nudge_mouse() -> None:
+    """One pixel right and back, as injected input, so the window under the cursor
+    is asked for its cursor shape again."""
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_void_p)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("mi", MOUSEINPUT), ("_pad", ctypes.c_ulonglong)]
+
+    for dx in (1, -1):
+        inp = INPUT(); inp.type = 0; inp.mi.dx = dx; inp.mi.dy = 0; inp.mi.dwFlags = 0x0001  # MOUSEEVENTF_MOVE
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        time.sleep(0.05)
 LOCKED_MARKERS = ("\u9501\u5b9a", "locked")
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -139,6 +189,8 @@ class ForegroundTrace:
         self.interventions: list[dict] = []
         self.hidden: set[int] = set()
         self.samples: list[tuple[float, int, str, str]] = []
+        self.cursor_samples: list[dict] = []
+        self._nudged = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -161,7 +213,17 @@ class ForegroundTrace:
     def _loop(self):
         start = time.monotonic()
         last = None
+        last_cursor: dict | None = None
         while not self._stop.is_set():
+            elapsed = round(time.monotonic() - start, 2)
+            probe = _cursor_probe(self.hold)
+            if probe != last_cursor:
+                last_cursor = probe
+                self.cursor_samples.append({"t": elapsed, **probe})
+            if elapsed >= 5.0 and not self._nudged:
+                self._nudged = True
+                _nudge_mouse()
+                self.cursor_samples.append({"t": elapsed, "nudge": True})
             hwnd = w.get_foreground_window()
             if hwnd != last:
                 last = hwnd
@@ -218,6 +280,8 @@ class ForegroundTrace:
                      for t, h, c, ti in self.samples],
             pushed_back=self.interventions[:12],
             pushed_back_count=len(self.interventions),
+            cursor=self.cursor_samples[:40],
+            cursor_changes=len(self.cursor_samples),
         )
         return False
 
