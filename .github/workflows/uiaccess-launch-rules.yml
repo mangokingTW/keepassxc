@@ -1,0 +1,117 @@
+# What Windows does with a uiAccess executable, by signature and location, on
+# both hosted images. Five copies of the same helper binary; each is started
+# through ShellExecuteEx and its token is read. Expectations are fixed in the
+# command line, so a green job is the measurement.
+name: "uiAccess launch rules (signature x location)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_run_id:
+        description: "Run id whose kpxc-stage-patched artifact provides the helper"
+        required: false
+        default: "34009027041"
+
+permissions:
+  contents: read
+
+jobs:
+  rules:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+    name: "rules on ${{ matrix.runner }}"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Download the built bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: kpxc-stage-patched
+          path: stage
+          run-id: ${{ github.event.inputs.bundle_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Prepare five copies of the helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = (Get-ChildItem stage -Recurse -Filter 'keepassxc-uiaccess-helper.exe' | Select-Object -First 1).FullName
+          "as built: $((Get-AuthenticodeSignature $src).Status)"
+          $cert = New-SelfSignedCertificate -Subject "CN=uiaccess launch rules" -Type CodeSigningCert `
+            -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddDays(2)
+          foreach ($store in 'Root', 'TrustedPublisher') {
+            $s = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, 'LocalMachine')
+            $s.Open('ReadWrite'); $s.Add($cert); $s.Close()
+          }
+          $pf = Join-Path $env:ProgramFiles 'uiaccess-rules'
+          $tmp = Join-Path $env:RUNNER_TEMP 'uiaccess-rules'
+          $variants = @{
+            'pf-signed'     = "$pf\signed\keepassxc-uiaccess-helper.exe"
+            'pf-unsigned'   = "$pf\unsigned\keepassxc-uiaccess-helper.exe"
+            'pf-tampered'   = "$pf\tampered\keepassxc-uiaccess-helper.exe"
+            'tmp-signed'    = "$tmp\signed\keepassxc-uiaccess-helper.exe"
+            'tmp-unsigned'  = "$tmp\unsigned\keepassxc-uiaccess-helper.exe"
+          }
+          foreach ($v in $variants.GetEnumerator()) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $v.Value) | Out-Null
+            Copy-Item $src $v.Value -Force
+            if ($v.Key -like '*-signed' -or $v.Key -eq 'pf-tampered') {
+              Set-AuthenticodeSignature -FilePath $v.Value -Certificate $cert -HashAlgorithm SHA256 | Out-Null
+            }
+            if ($v.Key -eq 'pf-tampered') {
+              $b = [IO.File]::ReadAllBytes($v.Value); $b[0x600] = $b[0x600] -bxor 0xFF; [IO.File]::WriteAllBytes($v.Value, $b)
+            }
+            "$($v.Key): $((Get-AuthenticodeSignature $v.Value).Status)  $($v.Value)"
+            "V_$($v.Key.Replace('-','_'))=$($v.Value)" >> $env:GITHUB_ENV
+          }
+
+      - name: Launch each copy from a High-integrity parent (the runner's default)
+        shell: pwsh
+        run: |
+          python tests/ui-credui/uiaccess_launch_rules.py high.json `
+            "Signed copy under Program Files|$env:V_pf_signed|granted" `
+            "Signed copy in a user-writable directory|$env:V_tmp_signed|plain" `
+            "Unsigned copy under Program Files|$env:V_pf_unsigned|refused" `
+            "Unsigned copy in a user-writable directory|$env:V_tmp_unsigned|refused" `
+            "Signed then tampered copy under Program Files|$env:V_pf_tampered|refused" | Tee-Object -FilePath high.log
+          if ($LASTEXITCODE -ne 0) { throw "a rule did not hold (High launcher)" }
+
+      - name: Launch each copy from a Medium-integrity parent
+        shell: pwsh
+        run: |
+          python tests/ui-credui/run_at_medium_integrity.py python tests/ui-credui/uiaccess_launch_rules.py medium.json `
+            "Signed copy under Program Files|$env:V_pf_signed|granted" `
+            "Signed copy in a user-writable directory|$env:V_tmp_signed|plain" `
+            "Unsigned copy under Program Files|$env:V_pf_unsigned|refused" `
+            "Unsigned copy in a user-writable directory|$env:V_tmp_unsigned|refused" `
+            "Signed then tampered copy under Program Files|$env:V_pf_tampered|refused" | Tee-Object -FilePath medium.log
+          if ($LASTEXITCODE -ne 0) { throw "a rule did not hold (Medium launcher)" }
+
+      - name: Job summary
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($f in 'high.log', 'medium.log') {
+            if (Test-Path $f) {
+              "### ${{ matrix.runner }}: $f" >> $env:GITHUB_STEP_SUMMARY
+              '```' >> $env:GITHUB_STEP_SUMMARY; Get-Content $f >> $env:GITHUB_STEP_SUMMARY; '```' >> $env:GITHUB_STEP_SUMMARY
+            }
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: uiaccess-launch-rules-${{ matrix.runner }}
+          path: |
+            high.json
+            medium.json
+            high.log
+            medium.log
+          if-no-files-found: warn
