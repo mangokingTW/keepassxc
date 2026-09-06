@@ -1,0 +1,169 @@
+# Runs KeePassXC's own unit tests on the three desktop platforms, for the patched
+# tree and for the upstream base it sits on. The uiAccess change touches the
+# shared Auto-Type loop (src/autotype/AutoType.cpp, AutoTypePlatform.h), so
+# "other platforms are unchanged" is a claim about code every platform compiles
+# and testautotype exercises; this measures it instead of asserting it.
+#
+# The base leg exists so a red test can be attributed: one that fails on the
+# base too is not this change's regression.
+name: "Upstream unit tests (patched vs base)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: 6.8.1
+  # The upstream develop commit the patch is rebased onto.
+  BASE_REF: 31a4c9dd
+  CMAKE_COMMON: -DWITH_TESTS=ON -DWITH_XC_AUTOTYPE=ON -DKPXC_FEATURE_DOCS=OFF -DCMAKE_BUILD_TYPE=Release
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-latest]
+        variant: [patched, base]
+    name: "${{ matrix.variant }} on ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the upstream base for the base variant
+        if: matrix.variant == 'base'
+        shell: bash
+        run: |
+          git checkout --detach "$BASE_REF"
+          echo "base=$(git rev-parse --short HEAD)"
+          # Fail closed: the base must not contain the patch.
+          if git grep -q "UiAccessInjector" -- src; then echo "base still has the patch"; exit 1; fi
+
+      # ---------------------------------------------------------------- Linux
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            qt6-base-dev qt6-base-private-dev qt6-tools-dev qt6-tools-dev-tools qt6-l10n-tools \
+            libqt6svg6-dev libgl1-mesa-dev \
+            libargon2-dev libkeyutils-dev libminizip-dev libbotan-2-dev libqrencode-dev zlib1g-dev \
+            libreadline-dev libpcsclite-dev libusb-1.0-0-dev \
+            libx11-dev libxi-dev libxtst-dev libxkbcommon-dev xvfb xclip xsel
+
+      - name: Configure and build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S . -B build -G Ninja $CMAKE_COMMON
+          cmake --build build --parallel
+
+      - name: Run the unit tests (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          ctest --test-dir build -N | grep -q "testautotype" || { echo "testautotype is not in the test list"; exit 1; }
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" ctest --test-dir build --output-on-failure --timeout 900
+
+      # ---------------------------------------------------------------- macOS
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install qt botan minizip qrencode readline ninja
+
+      - name: Configure and build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S . -B build -G Ninja $CMAKE_COMMON -DWITH_APP_BUNDLE=OFF \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix readline)"
+          cmake --build build --parallel
+
+      - name: Run the unit tests (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ctest --test-dir build -N | grep -q "testautotype" || { echo "testautotype is not in the test list"; exit 1; }
+          ctest --test-dir build --output-on-failure --timeout 900
+
+      # -------------------------------------------------------------- Windows
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.13"
+
+      - name: Cache Qt (Windows)
+        if: runner.os == 'Windows'
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Qt
+          key: qt-${{ env.QT_VERSION }}-win64_msvc2022_64
+
+      - name: Install Qt (Windows)
+        if: runner.os == 'Windows' && steps.qt-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pip install aqtinstall
+          aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -O C:\Qt
+          if ($LASTEXITCODE -ne 0) { throw "aqt install-qt failed with $LASTEXITCODE" }
+
+      - name: Cache vcpkg packages (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/vcpkg_installed
+            ~/AppData/Local/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+
+      - name: Configure and build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = "C:\Qt\$env:QT_VERSION\msvc2022_64"
+          if (-not (Test-Path $prefix)) { throw "no Qt at $prefix" }
+          "QT_PREFIX=$prefix" >> $env:GITHUB_ENV
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          if (-not $vs) { throw "vswhere found no Visual Studio installation" }
+          $configure = @(
+            'cmake -S . -B build -G Ninja',
+            $env:CMAKE_COMMON,
+            '-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl',
+            "-DCMAKE_TOOLCHAIN_FILE=`"$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake`"",
+            '-DVCPKG_TARGET_TRIPLET=x64-windows',
+            "-DCMAKE_PREFIX_PATH=`"$prefix`""
+          ) -join ' '
+          cmd /c "call `"$vs\Common7\Tools\VsDevCmd.bat`" -arch=x64 -no_logo && $configure && cmake --build build --parallel"
+          if ($LASTEXITCODE -ne 0) { throw "the build failed with $LASTEXITCODE" }
+
+      - name: Run the unit tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The test executables load Qt and the vcpkg libraries from PATH.
+          $env:PATH = "$env:QT_PREFIX\bin;$env:GITHUB_WORKSPACE\build\vcpkg_installed\x64-windows\bin;$env:PATH"
+          $env:QT_PLUGIN_PATH = "$env:QT_PREFIX\plugins"
+          $list = ctest --test-dir build -N
+          if (-not ($list -match 'testautotype')) { throw "testautotype is not in the test list" }
+          ctest --test-dir build --output-on-failure --timeout 900
+          if ($LASTEXITCODE -ne 0) { throw "ctest failed with $LASTEXITCODE" }
+
+      # --------------------------------------------------------------- Always
+      - name: Upload the ctest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-${{ matrix.variant }}-${{ matrix.os }}
+          path: build/Testing/Temporary/
+          if-no-files-found: warn
+          retention-days: 14
