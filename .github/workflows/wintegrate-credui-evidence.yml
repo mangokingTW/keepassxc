@@ -291,8 +291,18 @@ jobs:
       fail-fast: false
       matrix:
         variant: [patched, control]
-    name: "verify ${{ matrix.variant }}"
-    runs-on: windows-latest
+        runner: [windows-latest, windows-11-arm]
+        # The same x64 bundles on both. windows-11-arm runs them under x64
+        # emulation, so that leg says nothing about a native ARM64 build; what
+        # it adds is the client SKU (Windows 11) next to Server 2025, and a
+        # second machine on which the OS has to grant uiAccess.
+        include:
+          - runner: windows-latest
+            suffix: ""
+          - runner: windows-11-arm
+            suffix: -arm64
+    name: "verify ${{ matrix.variant }} on ${{ matrix.runner }}"
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -618,7 +628,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: credui-evidence-${{ matrix.variant }}
+          name: credui-evidence-${{ matrix.variant }}${{ matrix.suffix }}
           path: |
             evidence-artifacts/
           if-no-files-found: warn
@@ -646,19 +656,23 @@ jobs:
       - name: Require both halves
         run: |
           set -o pipefail
+          # One pair per runner: "" is windows-latest, -arm64 is windows-11-arm.
+          for suffix in "" -arm64; do
           for variant in patched control; do
-            dir="evidence/credui-evidence-$variant"
-            test -f "$dir/session_events.json" || { echo "missing timeline for $variant"; exit 1; }
-            test -f "$dir/helper-watch.log" || { echo "missing helper watch for $variant"; exit 1; }
+            dir="evidence/credui-evidence-$variant$suffix"
+            test -f "$dir/session_events.json" || { echo "missing timeline for $variant$suffix"; exit 1; }
+            test -f "$dir/helper-watch.log" || { echo "missing helper watch for $variant$suffix"; exit 1; }
             submitted=$(jq -r '[.[] | select(.type == "credui_outcome")] | last | .submitted' \
                         "$dir/session_events.json")
             helper=$(grep -c 'started pid=' "$dir/helper-watch.log" || true)
-            echo "$variant: helper_started=$helper submitted=$submitted"
+            echo "$variant$suffix: helper_started=$helper submitted=$submitted"
             case "$variant" in
-              patched) test "$helper" -ge 1 || { echo "the patched build never started the helper"; exit 1; } ;;
-              control) test "$helper" -eq 0 || { echo "the control started a helper it does not contain"; exit 1; }
-                       test "$submitted" = "false" || { echo "the control submitted the prompt"; exit 1; } ;;
+              patched) test "$helper" -ge 1 || { echo "the patched build never started the helper ($suffix)"; exit 1; }
+                       test "$submitted" = "true" || { echo "the patched build did not submit the prompt ($suffix)"; exit 1; } ;;
+              control) test "$helper" -eq 0 || { echo "the control started a helper it does not contain ($suffix)"; exit 1; }
+                       test "$submitted" = "false" || { echo "the control submitted the prompt ($suffix)"; exit 1; } ;;
             esac
           done
-          echo "the pair holds: only the patched build delegates to the privileged helper for this window,"
-          echo "and the control cannot type into it at all"
+          done
+          echo "both pairs hold: only the patched build delegates to the privileged helper for this window,"
+          echo "and the control cannot type into it at all -- on Server 2025 (x64) and on Windows 11 (windows-11-arm, x64 emulation)"
