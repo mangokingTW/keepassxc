@@ -16,6 +16,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -75,8 +76,13 @@ def launch(path: str) -> dict:
 
 
 def ps(expr: str) -> str:
-    out = subprocess.run(["powershell", "-NoProfile", "-Command", expr], capture_output=True, text=True)
-    return (out.stdout or out.stderr).strip()
+    # Explicit import: under a pwsh step the runner's PSModulePath points Windows
+    # PowerShell at modules it cannot load, and autoloading the Security module fails.
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", f"Import-Module Microsoft.PowerShell.Security; {expr}"],
+        capture_output=True, text=True, env={k: v for k, v in os.environ.items() if k != "PSModulePath"},
+    )
+    return (out.stdout or out.stderr).strip().splitlines()[0] if (out.stdout or out.stderr).strip() else "?"
 
 
 def policy(name: str):
@@ -101,7 +107,11 @@ def line(text: str = "", verdict: str | None = None) -> None:
 
 def main(argv: list[str]) -> int:
     out_path, specs = argv[0], argv[1:]
-    me = token_facts(kernel32.GetCurrentProcess())
+    # A real handle, not the pseudo-handle: OpenProcessToken on the latter is refused
+    # under some runner tokens.
+    own = kernel32.OpenProcess(0x1000, False, kernel32.GetCurrentProcessId())  # PROCESS_QUERY_LIMITED_INFORMATION
+    me = token_facts(own)
+    kernel32.CloseHandle(own)
     subject = specs[0].split("|", 2)[1]
     manifest = open(subject, "rb").read()
     attr = manifest[manifest.find(b"uiAccess="):][:16].decode("ascii", "replace") if b"uiAccess=" in manifest else "(absent)"
